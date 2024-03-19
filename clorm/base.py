@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import enum
 import sqlite3
 import weakref
@@ -7,13 +7,16 @@ from typing import (
     ClassVar,
     Generic,
     Mapping,
+    Literal,
     TypeVar,
     Self,
     Any,
     Never,
+    Iterator,
     get_origin,
     get_args,
     Union,
+    Sequence,
 )
 from types import UnionType, NoneType
 
@@ -36,11 +39,145 @@ class Clorm:
         res = cursor.execute(query, parameters)
         return res.fetchone()
 
+    def select(self, query: str, parameters: tuple[Any, ...] = ()) -> sqlite3.Cursor:
+        cursor = self.conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        return cursor.execute(query, parameters)
+
+    def select_tuple(self, query: str, parameters: tuple[Any, ...] = ()) -> Any:
+        cursor = self.conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        res = cursor.execute(query, parameters)
+        return res.fetchone()
+
     def execute(self, query: str, parameters: tuple[Any, ...] = ()) -> sqlite3.Cursor:
         cursor = self.conn.cursor()
         res = cursor.execute(query, parameters)
         self.conn.commit()
         return res
+
+
+class Condition:
+    def __or__(self, other: Condition) -> OrCondition:
+        return OrCondition(self, other)
+
+    def __inv__(self) -> NotCondition:
+        return NotCondition(self)
+
+    def stringify(self) -> tuple[str, tuple[object, ...]]:
+        raise NotImplementedError
+
+
+@dataclass
+class Comparison(Condition):
+    left: Field
+    operator: Literal["<", "<=", ">", ">=", "=", "!="]
+    right: Any
+
+    def stringify(self) -> tuple[str, tuple[object, ...]]:
+        if self.right is None:
+            match self.operator:
+                case "=":
+                    return f"({self.left.name} IS NULL)", ()
+                case "!=":
+                    return f"({self.left.name} IS NOT NULL)", ()
+                case _:
+                    raise TypeError("Unsupported operator")
+        right = self.left.serialize(self.right)
+        return f"({self.left.name} {self.operator} ?)", (right,)
+
+
+@dataclass
+class OrCondition(Condition):
+    left: Condition
+    right: Condition
+
+    def stringify(self) -> tuple[str, tuple[object, ...]]:
+        left, left_args = self.left.stringify()
+        right, right_args = self.right.stringify()
+        return f"({left} OR {right})", (*left_args, *right_args)
+
+
+@dataclass
+class NotCondition(Condition):
+    cond: Condition
+
+    def stringify(self) -> tuple[str, tuple[object, ...]]:
+        query, args = self.cond.stringify()
+        return f"NOT {query}", args
+
+
+@dataclass
+class Contains(Condition):
+    left: Field
+    positive: bool
+    values: Sequence[Any]
+
+    def stringify(self) -> tuple[str, tuple[object, ...]]:
+        vals = tuple(self.left.serialize(val) for val in vals)
+        condition = "IN" if self.positive else "NOT IN"
+        return f"({self.left.name} {condition} ?)", (vals,)
+
+
+@dataclass
+class OrderBy:
+    field: Field
+    ascending: True
+
+    def stringify(self) -> str:
+        direction = "ASC" if self.ascending else "DESC"
+        return f"{self.field.name} {direction}"
+
+
+ModelT = TypeVar("ModelT", bound="Model")
+
+
+@dataclass
+class Query(Generic[ModelT]):
+    model: ModelT
+    conditions: Sequence[Condition] = ()
+    order_by_columns: Sequence[OrderBy] = ()
+    limit_clause: int | None = None
+
+    def filter(self, *conds: Condition) -> Query:
+        return replace(self, conditions=[*self.conditions, *conds])
+
+    def limit(self, limit: int) -> Query:
+        return replace(self, limit_clause=limit)
+
+    def order_by(self, *orders: OrderBy) -> Query:
+        return replace(self, order_by_columns=[*self.order_by_columns, *orders])
+
+    def stringify(self, columns: str = "*") -> tuple[str, tuple[object, ...]]:
+        query = f"SELECT {columns} FROM {self.model.clorm_table_name}"
+        params = []
+        if self.conditions:
+            pairs = [cond.stringify() for cond in self.conditions]
+            where = " AND ".join(cond for cond, _ in pairs)
+            query = f"{query} WHERE {where}"
+            params += (param for _, params in pairs for param in params)
+        if self.order_by_columns:
+            order_by = ", ".join(item.stringify() for item in self.order_by_columns)
+            query = f"{query} ORDER BY {order_by}"
+        if self.limit_clause is not None:
+            query += f" LIMIT ?"
+            params.append(self.limit_clause)
+        return query, tuple(params)
+
+    def count(self) -> int:
+        query, params = self.stringify("COUNT(*)")
+        (count,) = self.model.clorm.select_tuple(query, params)
+        return count
+
+    def __iter__(self) -> Iterator[ModelT]:
+        query, params = self.stringify()
+        cursor = self.model.clorm.select(query, params)
+        while True:
+            rows = cursor.fetchmany()
+            if not rows:
+                break
+            for row in rows:
+                yield self.model(**row)
 
 
 class Field(Generic[T]):
@@ -125,6 +262,33 @@ class Field(Generic[T]):
                     return
         raise TypeError(f"Unsupported type {param}")
 
+    def __eq__(self, other: T) -> Condition:
+        return Comparison(self, "=", other)
+
+    def __ne__(self, other: T) -> Condition:
+        return Comparison(self, "!=", other)
+
+    def __gt__(self, other: T) -> Condition:
+        return Comparison(self, ">", other)
+
+    def __ge__(self, other: T) -> Condition:
+        return Comparison(self, ">=", other)
+
+    def __lt__(self, other: T) -> Condition:
+        return Comparison(self, "<", other)
+
+    def __le__(self, other: T) -> Condition:
+        return Comparison(self, "<=", other)
+
+    def contains(self, other: Sequence[T]) -> Condition:
+        return Contains(self, True, other)
+
+    def asc(self) -> OrderBy:
+        return OrderBy(self, True)
+
+    def desc(self) -> OrderBy:
+        return OrderBy(self, False)
+
 
 EnumT = TypeVar("EnumT", bound=enum.Enum)
 
@@ -185,9 +349,6 @@ class Model:
         query = f"SELECT * FROM {self.clorm_table_name} WHERE id = ?"
         row = self.clorm.select_one(query, (self.id,))
         if row is None:
-            cursor = self.clorm.conn.cursor()
-            res = cursor.execute("SELECT * FROM taxon")
-            print(res.fetchall())
             raise DoesNotExist(self.id)
         self._clorm_data.update(row)
 
@@ -203,3 +364,11 @@ class Model:
         )
         cursor = cls.clorm.execute(query, params)
         return cls(cursor.lastrowid)
+
+    @classmethod
+    def select(cls) -> Query:
+        return Query(cls)
+
+    def delete_instance(self) -> None:
+        query = f"DELETE FROM {self.clorm_table_name} WHERE id = ?"
+        self.clorm.execute(query, (self.id,))
