@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import enum
 import sqlite3
+import sys
 import weakref
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import NoneType, UnionType
 from typing import (
     Any,
     ClassVar,
+    ForwardRef,
     Generic,
     Literal,
-    Never,
+    NewType,
     Self,
     TypeVar,
     Union,
@@ -20,6 +22,9 @@ from typing import (
     overload,
 )
 
+import typing_extensions
+
+Id = NewType("Id", int)
 T = TypeVar("T")
 
 
@@ -30,6 +35,10 @@ class DoesNotExist(Exception):
 @dataclass
 class Clorm:
     conn: sqlite3.Connection
+    models: dict[str, type[Model]] = field(default_factory=dict)
+
+    def get_name_to_model_cls(self) -> dict[str, type[Model]]:
+        return {cls.__name__: cls for cls in self.models.values()}
 
     def select_one(
         self, query: str, parameters: tuple[Any, ...] = ()
@@ -182,8 +191,10 @@ class Query(Generic[ModelT]):
 
 class Field(Generic[T]):
     name: str
-    _typ: type[T]
+    _type_object: type[object]
     _allow_none: bool
+    _full_type: Any
+    model_cls: type[Model]
 
     def __init__(self, name: str | None = None) -> None:
         if name is not None:
@@ -207,7 +218,7 @@ class Field(Generic[T]):
     def deserialize(self, raw_value: Any) -> T:
         if self.allow_none and raw_value is None:
             return None
-        return self.typ(raw_value)
+        return self.type_object(raw_value)
 
     def get_raw(self, obj: Model) -> Any:
         if self.name not in obj._clorm_data:
@@ -221,25 +232,38 @@ class Field(Generic[T]):
     def serialize(self, value: T) -> Any:
         if self.allow_none and value is None:
             return None
+        if not isinstance(value, self.type_object):
+            raise TypeError(
+                f"Cannot set value {value!r} in field of type {self.type_object}"
+            )
+        if issubclass(self.type_object, enum.Enum):
+            return value.value
+        if issubclass(self.type_object, Model):
+            return value.id
         return value
 
     def set_raw(self, obj: Model, value: Any) -> None:
+        if self.full_type is Id:
+            raise AttributeError("Cannot set id field")
         query = f"UPDATE {obj.clorm_table_name} SET {self.name} = ? WHERE id = ?"
         params = (value, obj.id)
         obj.clorm.execute(query, params)
         obj._clorm_data[self.name] = value
 
     @property
-    def typ(self) -> type[T]:
-        if not hasattr(self, "_typ"):
-            self._resolve_type()
-        return self._typ
+    def type_object(self) -> type[T]:
+        self._resolve_type()
+        return self._type_object
 
     @property
     def allow_none(self) -> bool:
-        if not hasattr(self, "_typ"):
-            self._resolve_type()
+        self._resolve_type()
         return self._allow_none
+
+    @property
+    def full_type(self) -> Any:
+        self._resolve_type()
+        return self._full_type
 
     def get_type_parameter(self) -> Any:
         if hasattr(self, "__orig_class__"):
@@ -250,21 +274,34 @@ class Field(Generic[T]):
         raise TypeError("Cannot resolve generic Field class")
 
     def _resolve_type(self) -> None:
+        if hasattr(self, "_type_object"):
+            return
+        self._full_type, self._type_object, self._allow_none = self._get_resolved_type()
+
+    def _get_resolved_type(self) -> tuple[Any, type[object], bool]:
         param = self.get_type_parameter()
         (arg,) = get_args(param)
+        if isinstance(arg, ForwardRef):
+            ns = {
+                **self.model_cls.clorm.get_name_to_model_cls(),
+                **sys.modules[self.model_cls.__module__].__dict__,
+            }
+            arg = eval(arg.__forward_code__, ns)
         if isinstance(arg, type):
-            self._typ = arg
-            self._allow_none = False
-            return
+            return (arg, arg, False)
+        if arg is Self or arg is typing_extensions.Self:
+            return (self.model_cls, self.model_cls, False)
+        if arg is Id:
+            return (arg, int, False)
         origin = get_origin(arg)
         if origin is Union or origin is UnionType:
             args = get_args(arg)
             if NoneType in args:
                 (arg,) = (obj for obj in args if obj is not NoneType)
                 if isinstance(arg, type):
-                    self._typ = arg
-                    self._allow_none = True
-                    return
+                    return (arg | None, arg, True)
+                elif arg is Self or arg is typing_extensions.Self:
+                    return (self.model_cls | None, self.model_cls, True)
         raise TypeError(f"Unsupported type {param}")
 
     def __eq__(self, other: T) -> Condition:
@@ -295,29 +332,11 @@ class Field(Generic[T]):
         return OrderBy(self, False)
 
 
-EnumT = TypeVar("EnumT", bound=enum.Enum)
+MaybeModelT = TypeVar("MaybeModelT", bound="Model | None")
 
 
-class EnumField(Field[EnumT]):
-    def serialize(self, value: EnumT) -> Any:
-        if self.allow_none and value is None:
-            return None
-        return value.value
-
-
-class IdField(Field[int]):
-    @overload
-    def __get__(self, obj: None, objtype: object = None) -> Self: ...
-    @overload
-    def __get__(self, obj: Model | None, objtype: object = None) -> int: ...
-
-    def __get__(self, obj: Model | None, objtype: object = None) -> int | Self:
-        if obj is None:
-            return self
-        return obj._clorm_data[self.name]
-
-    def __set__(self, obj: Model, value: Never) -> None:
-        raise AttributeError("Cannot set id field")
+class ForeignKeyField(Field[MaybeModelT]):
+    pass
 
 
 class Model:
@@ -326,9 +345,10 @@ class Model:
 
     _clorm_fields: ClassVar[dict[str, Field]]
     _clorm_instance_cache: ClassVar[weakref.WeakValueDictionary[int, Self]]
+    _clorm_has_unresolved_types: ClassVar[bool] = True
     _clorm_data: dict[str, Any]
 
-    id = IdField()
+    id = Field[Id]()
 
     def __init_subclass__(cls) -> None:
         if not hasattr(cls, "clorm_table_name"):
@@ -340,7 +360,13 @@ class Model:
             if isinstance(obj, Field):
                 if not hasattr(obj, "name"):
                     raise RuntimeError("field does not have a name")
+                if hasattr(obj, "model_cls"):
+                    raise RuntimeError(
+                        f"field {obj.name} is already associated with a class"
+                    )
+                obj.model_cls = cls
                 cls._clorm_fields[obj.name] = obj
+        cls.clorm.models[cls.clorm_table_name] = cls
 
     def __init__(self, id: int, **kwargs: Any) -> None:
         self._clorm_data = {"id": id, **kwargs}

@@ -1,7 +1,9 @@
 import enum
 import sqlite3
+from collections.abc import Sequence
+from typing import Self
 
-from clorm import Clorm, EnumField, Field, Model
+from clorm import Clorm, Field, Model
 
 
 class Status(enum.Enum):
@@ -9,13 +11,20 @@ class Status(enum.Enum):
     nomen_dubium = 2
 
 
-def test() -> None:
+def make_clorm(tables: Sequence[str]) -> Clorm:
     # bug in inspect?
     conn = sqlite3.connect(":memory:")  # static analysis: ignore[internal_error]
-    conn.execute("CREATE TABLE taxon(id INTEGER PRIMARY KEY, name, extinct, status)")
+    for table in tables:
+        conn.execute(table)
     conn.commit()
 
-    clorm_global = Clorm(conn)
+    return Clorm(conn)
+
+
+def test() -> None:
+    clorm_global = make_clorm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name, extinct, status)"]
+    )
 
     class Taxon(Model):
         clorm = clorm_global
@@ -23,7 +32,7 @@ def test() -> None:
 
         name = Field[str]()
         extinct = Field[bool]()
-        status = EnumField[Status | None]()
+        status = Field[Status | None]()
 
     txn = Taxon.create(name="Neurotrichus", extinct=False)
     assert txn.name == "Neurotrichus"
@@ -71,3 +80,45 @@ def test() -> None:
     assert [t.name for t in Taxon.select().order_by(Taxon.name.desc())] == [
         f"Taxon{4 - i}" for i in range(5)
     ]
+
+
+def test_foreign_key() -> None:
+    # bug in inspect?
+    conn = sqlite3.connect(":memory:")  # static analysis: ignore[internal_error]
+    conn.execute("CREATE TABLE taxon(id INTEGER PRIMARY KEY, name, extinct, status)")
+    conn.commit()
+
+    clorm_global = make_clorm(
+        [
+            "CREATE TABLE taxon(id INTEGER PRIMARY KEY, parent, valid_name, base_name)",
+            "CREATE TABLE name(id INTEGER PRIMARY KEY, taxon, root_name)",
+        ]
+    )
+
+    class Name(Model):
+        clorm = clorm_global
+        clorm_table_name = "name"
+
+        taxon = Field["Taxon"]()
+        root_name = Field[str]()
+
+    class Taxon(Model):
+        clorm = clorm_global
+        clorm_table_name = "taxon"
+
+        valid_name = Field[str]()
+        parent = Field[Self | None]()
+        base_name = Field[Name | None]()
+
+    txn = Taxon.create(valid_name="Talpidae")
+    assert txn.parent is None
+    assert txn.base_name is None
+    txn2 = Taxon.create(valid_name="Neurotrichus", parent=txn)
+    assert txn2.parent is txn
+    assert txn2.base_name is None
+
+    nam = Name.create(taxon=txn, root_name="Talp")
+    assert nam.taxon is txn
+    assert nam.root_name == "Talp"
+    txn.base_name = nam
+    assert txn.base_name is nam
