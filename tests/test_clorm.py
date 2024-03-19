@@ -37,3 +37,12 @@ def test() -> None:
     assert txn3.name == "Scotophilus borbonicus"
     assert txn3.extinct is True
     assert txn3.status is Status.nomen_dubium
+
+    txn3.status = Status.valid
+    assert txn3.status is Status.valid
+
+    id3 = txn3.id
+    del txn3
+
+    txn4 = Taxon(id3)
+    assert txn4.status is Status.valid
