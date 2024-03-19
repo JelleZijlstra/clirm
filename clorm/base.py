@@ -200,6 +200,11 @@ class Query(Generic[ModelT]):
         (count,) = self.model.clorm.select_tuple(query, params)
         return count
 
+    def get_one(self) -> ModelT:
+        for obj in self:
+            return obj
+        raise DoesNotExist(self.model)
+
     def __iter__(self) -> Iterator[ModelT]:
         query, params = self.stringify()
         cursor = self.model.clorm.select(query, params)
@@ -496,6 +501,10 @@ class Model:
     @classmethod
     def select(cls) -> Query:
         return Query(cls)
+
+    @classmethod
+    def get(cls, *conditions: Condition) -> Self:
+        return cls.select().filter(*conditions).get_one()
 
     def delete_instance(self) -> None:
         query = f"DELETE FROM {self.clorm_table_name} WHERE id = ?"
