@@ -3,6 +3,8 @@ import sqlite3
 from collections.abc import Sequence
 from typing import Self
 
+import pytest
+
 from clorm import Clorm, Field, Model
 
 
@@ -122,3 +124,39 @@ def test_foreign_key() -> None:
     assert nam.root_name == "Talp"
     txn.base_name = nam
     assert txn.base_name is nam
+
+
+def test_default() -> None:
+    clorm_global = make_clorm(
+        [
+            "CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL, is_extinct, status)"
+        ]
+    )
+
+    class Taxon(Model):
+        clorm = clorm_global
+        clorm_table_name = "taxon"
+
+        name = Field[str]()
+        extinct = Field[bool]("is_extinct", default=False)
+        status = Field[Status | None]()
+
+    txn = Taxon.create(name="Neurotrichus")
+    assert txn.name == "Neurotrichus"
+    assert txn.extinct is False
+    assert txn.status is None
+
+    txn2 = Taxon.create(name="Megalomys", extinct=True)
+    assert txn2.name == "Megalomys"
+    assert txn2.extinct is True
+    assert txn2.status is None
+
+    txn3 = Taxon.create(name="Veratalpa", status=Status.nomen_dubium)
+    assert txn3.name == "Veratalpa"
+    assert txn3.extinct is False
+    assert txn3.status is Status.nomen_dubium
+
+    with pytest.raises(sqlite3.IntegrityError):
+        Taxon.create(extinct=True)  # name must be given
+    with pytest.raises(TypeError):
+        Taxon.create(not_a_kwarg=1, name="Veratalpa")

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import dataclasses
 import enum
 import sqlite3
 import sys
 import weakref
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field, replace
 from types import NoneType, UnionType
 from typing import (
     Any,
@@ -32,10 +32,10 @@ class DoesNotExist(Exception):
     """Raised when trying to access an object that does not exist."""
 
 
-@dataclass
+@dataclasses.dataclass
 class Clorm:
     conn: sqlite3.Connection
-    models: dict[str, type[Model]] = field(default_factory=dict)
+    models: dict[str, type[Model]] = dataclasses.field(default_factory=dict)
 
     def get_name_to_model_cls(self) -> dict[str, type[Model]]:
         return {cls.__name__: cls for cls in self.models.values()}
@@ -77,7 +77,7 @@ class Condition:
         raise NotImplementedError
 
 
-@dataclass
+@dataclasses.dataclass
 class Comparison(Condition):
     left: Field
     operator: Literal["<", "<=", ">", ">=", "=", "!="]
@@ -96,7 +96,7 @@ class Comparison(Condition):
         return f"({self.left.name} {self.operator} ?)", (right,)
 
 
-@dataclass
+@dataclasses.dataclass
 class OrCondition(Condition):
     left: Condition
     right: Condition
@@ -107,7 +107,7 @@ class OrCondition(Condition):
         return f"({left} OR {right})", (*left_args, *right_args)
 
 
-@dataclass
+@dataclasses.dataclass
 class NotCondition(Condition):
     cond: Condition
 
@@ -116,7 +116,7 @@ class NotCondition(Condition):
         return f"NOT {query}", args
 
 
-@dataclass
+@dataclasses.dataclass
 class Contains(Condition):
     left: Field
     positive: bool
@@ -128,7 +128,7 @@ class Contains(Condition):
         return f"({self.left.name} {condition} ?)", (vals,)
 
 
-@dataclass
+@dataclasses.dataclass
 class OrderBy:
     field: Field
     ascending: bool
@@ -141,7 +141,7 @@ class OrderBy:
 ModelT = TypeVar("ModelT", bound="Model")
 
 
-@dataclass
+@dataclasses.dataclass
 class Query(Generic[ModelT]):
     model: type[ModelT]
     conditions: Sequence[Condition] = ()
@@ -149,13 +149,15 @@ class Query(Generic[ModelT]):
     limit_clause: int | None = None
 
     def filter(self, *conds: Condition) -> Query:
-        return replace(self, conditions=[*self.conditions, *conds])
+        return dataclasses.replace(self, conditions=[*self.conditions, *conds])
 
     def limit(self, limit: int) -> Query:
-        return replace(self, limit_clause=limit)
+        return dataclasses.replace(self, limit_clause=limit)
 
     def order_by(self, *orders: OrderBy) -> Query:
-        return replace(self, order_by_columns=[*self.order_by_columns, *orders])
+        return dataclasses.replace(
+            self, order_by_columns=[*self.order_by_columns, *orders]
+        )
 
     def stringify(self, columns: str = "*") -> tuple[str, tuple[object, ...]]:
         query = f"SELECT {columns} FROM {self.model.clorm_table_name}"
@@ -191,14 +193,16 @@ class Query(Generic[ModelT]):
 
 class Field(Generic[T]):
     name: str
+    default: T | None
     _type_object: type[object]
     _allow_none: bool
     _full_type: Any
     model_cls: type[Model]
 
-    def __init__(self, name: str | None = None) -> None:
+    def __init__(self, name: str | None = None, *, default: T | None = None) -> None:
         if name is not None:
             self.name = name
+        self.default = default
 
     def __set_name__(self, owner: object, name: str) -> None:
         if not hasattr(self, "name"):
@@ -356,7 +360,7 @@ class Model:
 
         cls._clorm_instance_cache = weakref.WeakValueDictionary()
         cls._clorm_fields = {}
-        for obj in cls.__dict__.values():
+        for name, obj in cls.__dict__.items():
             if isinstance(obj, Field):
                 if not hasattr(obj, "name"):
                     raise RuntimeError("field does not have a name")
@@ -365,7 +369,7 @@ class Model:
                         f"field {obj.name} is already associated with a class"
                     )
                 obj.model_cls = cls
-                cls._clorm_fields[obj.name] = obj
+                cls._clorm_fields[name] = obj
         cls.clorm.models[cls.clorm_table_name] = cls
 
     def __init__(self, id: int, **kwargs: Any) -> None:
@@ -390,15 +394,24 @@ class Model:
 
     @classmethod
     def create(cls, **kwargs: Any) -> Self:
-        column_names = ",".join(kwargs)
-        placeholders = ",".join("?" for _ in kwargs)
-        params = tuple(
-            cls._clorm_fields[key].serialize(value) for key, value in kwargs.items()
-        )
-        query = (
-            f"INSERT INTO {cls.clorm_table_name}({column_names}) VALUES({placeholders})"
-        )
-        cursor = cls.clorm.execute(query, params)
+        column_names = []
+        params = []
+        for name, field in cls._clorm_fields.items():
+            if name in kwargs:
+                cooked_value = kwargs.pop(name)
+            else:
+                cooked_value = field.default
+                if cooked_value is None and not field.allow_none:
+                    continue
+            value = field.serialize(cooked_value)
+            column_names.append(field.name)
+            params.append(value)
+        if kwargs:
+            raise TypeError(f"Extra kwargs {', '.join(kwargs)}")
+
+        placeholders = ",".join("?" for _ in column_names)
+        query = f"INSERT INTO {cls.clorm_table_name}({','.join(column_names)}) VALUES({placeholders})"
+        cursor = cls.clorm.execute(query, tuple(params))
         return cls(cursor.lastrowid)
 
     @classmethod

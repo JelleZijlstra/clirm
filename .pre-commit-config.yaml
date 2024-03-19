@@ -30,3 +30,4 @@ repos:
         files: ^(clorm|tests)/.*\.py$
         additional_dependencies:
           - pyanalyze>=0.10.1
+          - pytest
