@@ -314,6 +314,7 @@ class Field(Generic[T]):
                     self.related_name,
                     make_foreign_key_accessor(self),
                 )
+                self._type_object.clorm_backrefs.append(self)
             else:
                 raise TypeError(
                     "Cannot set related_name on fields that are not foreign keys"
@@ -400,6 +401,7 @@ class Model:
 
     # Set by the abstraction
     clorm_fields: ClassVar[dict[str, Field]]
+    clorm_backrefs: list[Field]
     _clorm_instance_cache: ClassVar[weakref.WeakValueDictionary[int, Self]]
     _clorm_has_unresolved_types: ClassVar[bool] = True
     _clorm_data: dict[str, Any]
@@ -412,6 +414,7 @@ class Model:
 
         cls._clorm_instance_cache = weakref.WeakValueDictionary()
         cls.clorm_fields = {}
+        cls.clorm_backrefs = []
         for name, obj in cls.__dict__.items():
             if isinstance(obj, Field):
                 if not hasattr(obj, "name"):
