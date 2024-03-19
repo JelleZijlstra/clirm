@@ -69,7 +69,6 @@ class Clorm:
 
     def select_tuple(self, query: str, parameters: tuple[Any, ...] = ()) -> Any:
         cursor = self.conn.cursor()
-        cursor.row_factory = sqlite3.Row
         res = cursor.execute(query, parameters)
         return res.fetchone()
 
@@ -94,24 +93,24 @@ class Condition:
 @dataclasses.dataclass
 class Comparison(Condition):
     left: Field
-    operator: Literal["<", "<=", ">", ">=", "=", "!=", "INSTR"]
+    operator: Literal["<", "<=", ">", ">=", "=", "!=", "INSTR", "LIKE"]
     right: Any
 
     def stringify(self) -> tuple[str, tuple[object, ...]]:
         if self.right is None:
             match self.operator:
                 case "=":
-                    return f"({self.left.name} IS NULL)", ()
+                    return f"(`{self.left.name}` IS NULL)", ()
                 case "!=":
-                    return f"({self.left.name} IS NOT NULL)", ()
+                    return f"(`{self.left.name}` IS NOT NULL)", ()
                 case _:
                     raise TypeError("Unsupported operator")
         right = self.left.serialize(self.right)
         match self.operator:
             case "INSTR":
-                return f"INSTR({self.left.name}, ?)", (right,)
+                return f"INSTR(`{self.left.name}`, ?)", (right,)
             case _:
-                return f"({self.left.name} {self.operator} ?)", (right,)
+                return f"(`{self.left.name}` {self.operator} ?)", (right,)
         assert False, "unreachable"
 
 
@@ -145,7 +144,7 @@ class Contains(Condition):
         vals = tuple(self.left.serialize(val) for val in self.values)
         placeholders = ", ".join("?" for _ in vals)
         condition = "IN" if self.positive else "NOT IN"
-        return f"({self.left.name} {condition} ({placeholders}))", vals
+        return f"(`{self.left.name}` {condition} ({placeholders}))", vals
 
 
 @dataclasses.dataclass
@@ -163,7 +162,7 @@ class OrderBy:
 
     def stringify(self) -> tuple[str, tuple[object, ...]]:
         direction = "ASC" if self.ascending else "DESC"
-        return f"{self.field.name} {direction}", ()
+        return f"`{self.field.name}` {direction}", ()
 
 
 ModelT = TypeVar("ModelT", bound="Model")
@@ -176,13 +175,21 @@ class Query(Generic[ModelT]):
     order_by_columns: Sequence[OrderBy | Func] = ()
     limit_clause: int | None = None
 
-    def filter(self, *conds: Condition) -> Query:
-        return dataclasses.replace(self, conditions=[*self.conditions, *conds])
+    def filter(self, *conds: Condition, **kwargs: Any) -> Query:
+        kwargs_conds = [
+            getattr(self.model, key) == value for key, value in kwargs.items()
+        ]
+        return dataclasses.replace(
+            self, conditions=[*self.conditions, *conds, *kwargs_conds]
+        )
 
     def limit(self, limit: int) -> Query:
         return dataclasses.replace(self, limit_clause=limit)
 
-    def order_by(self, *orders: OrderBy | Func) -> Query:
+    def order_by(self, *orders: OrderBy | Field[object] | Func) -> Query:
+        orders = [
+            OrderBy(item, True) if isinstance(item, Field) else item for item in orders
+        ]
         return dataclasses.replace(
             self, order_by_columns=[*self.order_by_columns, *orders]
         )
@@ -210,7 +217,7 @@ class Query(Generic[ModelT]):
         (count,) = self.model.clorm.select_tuple(query, params)
         return count
 
-    def get_one(self) -> ModelT:
+    def get(self) -> ModelT:
         for obj in self:
             return obj
         raise DoesNotExist(self.model)
@@ -279,6 +286,8 @@ class Field(Generic[T]):
     def serialize(self, value: T) -> Any:
         if self.allow_none and value is None:
             return None
+        if type(value) in (int, str):
+            return value
         if not isinstance(value, self.type_object):
             raise TypeError(
                 f"Cannot set value {value!r} in field of type {self.type_object}"
@@ -292,10 +301,9 @@ class Field(Generic[T]):
     def set_raw(self, obj: Model, value: Any) -> None:
         if self.full_type is Id:
             raise AttributeError("Cannot set id field")
-        query = f"UPDATE {obj.clorm_table_name} SET {self.name} = ? WHERE id = ?"
-        params = (value, obj.id)
-        obj.clorm.execute(query, params)
         obj._clorm_data[self.name] = value
+        obj._clorm_dirty_fields.add(self.name)
+        obj.save()
 
     @property
     def type_object(self) -> type[T]:
@@ -324,22 +332,21 @@ class Field(Generic[T]):
         if hasattr(self, "_type_object"):
             return
         self._full_type, self._type_object, self._allow_none = self.get_resolved_type()
-        if self.related_name is not None:
-            if issubclass(self._type_object, Model):
-                if hasattr(self._type_object, self.related_name):
-                    raise TypeError(
-                        f"{self._type_object} already has an attribute {self.related_name}; cannot set related_name for {self}"
-                    )
-                setattr(
-                    self._type_object,
-                    self.related_name,
-                    make_foreign_key_accessor(self),
-                )
-                self._type_object.clorm_backrefs.append(self)
-            else:
+        if issubclass(self._type_object, Model):
+            if self.related_name is None:
+                self.related_name = self.model_cls.clorm_table_name + "_set"
+            if hasattr(self._type_object, self.related_name):
                 raise TypeError(
-                    "Cannot set related_name on fields that are not foreign keys"
+                    f"{self._type_object} already has an attribute {self.related_name}; cannot set related_name for {self}"
                 )
+            setattr(
+                self._type_object, self.related_name, make_foreign_key_accessor(self)
+            )
+            self._type_object.clorm_backrefs.append(self)
+        elif self.related_name is not None:
+            raise TypeError(
+                "Cannot set related_name on fields that are not foreign keys"
+            )
 
     def resolve_forward_ref(self, arg: ForwardRef) -> Any:
         ns = {
@@ -396,6 +403,12 @@ class Field(Generic[T]):
 
     def contains(self, other: T) -> Condition:
         return Comparison(self, "INSTR", other)
+
+    def startswith(self: Field[str], substring: str) -> Condition:
+        return Comparison(self, "LIKE", substring + "%")
+
+    def endswith(self: Field[str], substring: str) -> Condition:
+        return Comparison(self, "LIKE", "%" + substring)
 
     def is_in(self, other: Sequence[T]) -> Condition:
         return Contains(self, True, other)
@@ -468,6 +481,7 @@ class Model:
 
     def __init__(self, id: int, **kwargs: Any) -> None:
         self._clorm_data = {"id": id, **kwargs}
+        self._clorm_dirty_fields = set()
 
     def __new__(cls, id: int, **kwargs: Any) -> Self:
         if id in cls._clorm_instance_cache:
@@ -485,6 +499,15 @@ class Model:
         if row is None:
             raise DoesNotExist(self.id)
         self._clorm_data.update(row)
+
+    def save(self) -> None:
+        updates = ", ".join(
+            f"{field_name} = ?" for field_name in self._clorm_dirty_fields
+        )
+        params = [self._clorm_data[field] for field in self._clorm_dirty_fields]
+        query = f"UPDATE {self.clorm_table_name} SET {updates} WHERE id = ?"
+        self.clorm.execute(query, (*params, self.id))
+        self._clorm_dirty_fields.clear()
 
     @classmethod
     def create(cls, **kwargs: Any) -> Self:
@@ -509,12 +532,16 @@ class Model:
         return cls(cursor.lastrowid)
 
     @classmethod
-    def select(cls) -> Query:
+    def select(cls) -> Query[Self]:
         return Query(cls)
 
     @classmethod
-    def get(cls, *conditions: Condition) -> Self:
-        return cls.select().filter(*conditions).get_one()
+    def filter(cls, *conditions: Condition, **kwargs: Any) -> Query[Self]:
+        return cls.select().filter(*conditions, **kwargs)
+
+    @classmethod
+    def get(cls, *conditions: Condition, **kwargs: Any) -> Self:
+        return cls.select().filter(*conditions, **kwargs).get()
 
     def delete_instance(self) -> None:
         query = f"DELETE FROM {self.clorm_table_name} WHERE id = ?"
