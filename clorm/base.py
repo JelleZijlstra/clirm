@@ -32,13 +32,27 @@ class DoesNotExist(Exception):
     """Raised when trying to access an object that does not exist."""
 
 
+class UnresolvedType(Exception):
+    """Raised when a field's type has not yet been resolved."""
+
+
 @dataclasses.dataclass
 class Clorm:
     conn: sqlite3.Connection
     models: dict[str, type[Model]] = dataclasses.field(default_factory=dict)
+    models_with_unresolved_types: set[type[Model]] = dataclasses.field(
+        default_factory=set
+    )
 
     def get_name_to_model_cls(self) -> dict[str, type[Model]]:
         return {cls.__name__: cls for cls in self.models.values()}
+
+    def try_resolve_all_types(cls) -> None:
+        cls.models_with_unresolved_types = {
+            model
+            for model in cls.models_with_unresolved_types
+            if not model.clorm_try_resolve_types()
+        }
 
     def select_one(
         self, query: str, parameters: tuple[Any, ...] = ()
@@ -198,11 +212,19 @@ class Field(Generic[T]):
     _allow_none: bool
     _full_type: Any
     model_cls: type[Model]
+    related_name: str | None = None
 
-    def __init__(self, name: str | None = None, *, default: T | None = None) -> None:
+    def __init__(
+        self,
+        name: str | None = None,
+        *,
+        default: T | None = None,
+        related_name: str | None = None,
+    ) -> None:
         if name is not None:
             self.name = name
         self.default = default
+        self.related_name = related_name
 
     def __set_name__(self, owner: object, name: str) -> None:
         if not hasattr(self, "name"):
@@ -256,17 +278,17 @@ class Field(Generic[T]):
 
     @property
     def type_object(self) -> type[T]:
-        self._resolve_type()
+        self.resolve_type()
         return self._type_object
 
     @property
     def allow_none(self) -> bool:
-        self._resolve_type()
+        self.resolve_type()
         return self._allow_none
 
     @property
     def full_type(self) -> Any:
-        self._resolve_type()
+        self.resolve_type()
         return self._full_type
 
     def get_type_parameter(self) -> Any:
@@ -277,10 +299,25 @@ class Field(Generic[T]):
                 return base
         raise TypeError("Cannot resolve generic Field class")
 
-    def _resolve_type(self) -> None:
+    def resolve_type(self) -> None:
         if hasattr(self, "_type_object"):
             return
         self._full_type, self._type_object, self._allow_none = self._get_resolved_type()
+        if self.related_name is not None:
+            if issubclass(self._type_object, Model):
+                if hasattr(self._type_object, self.related_name):
+                    raise TypeError(
+                        f"{self._type_object} already has an attribute {self.related_name}; cannot set related_name for {self}"
+                    )
+                setattr(
+                    self._type_object,
+                    self.related_name,
+                    make_foreign_key_accessor(self),
+                )
+            else:
+                raise TypeError(
+                    "Cannot set related_name on fields that are not foreign keys"
+                )
 
     def _get_resolved_type(self) -> tuple[Any, type[object], bool]:
         param = self.get_type_parameter()
@@ -290,7 +327,10 @@ class Field(Generic[T]):
                 **self.model_cls.clorm.get_name_to_model_cls(),
                 **sys.modules[self.model_cls.__module__].__dict__,
             }
-            arg = eval(arg.__forward_code__, ns)
+            try:
+                arg = eval(arg.__forward_code__, ns)
+            except (NameError, AttributeError) as e:
+                raise UnresolvedType from e
         if isinstance(arg, type):
             return (arg, arg, False)
         if arg is Self or arg is typing_extensions.Self:
@@ -336,11 +376,12 @@ class Field(Generic[T]):
         return OrderBy(self, False)
 
 
-MaybeModelT = TypeVar("MaybeModelT", bound="Model | None")
+def make_foreign_key_accessor(field: Field) -> Any:
+    @property
+    def accessor(self: Any) -> Query[field.model_cls]:
+        return field.model_cls.select().filter(field == self)
 
-
-class ForeignKeyField(Field[MaybeModelT]):
-    pass
+    return accessor
 
 
 class Model:
@@ -371,6 +412,18 @@ class Model:
                 obj.model_cls = cls
                 cls._clorm_fields[name] = obj
         cls.clorm.models[cls.clorm_table_name] = cls
+        cls.clorm.models_with_unresolved_types.add(cls)
+        cls.clorm.try_resolve_all_types()
+
+    @classmethod
+    def clorm_try_resolve_types(cls) -> bool:
+        has_unresolved_types = False
+        for field in cls._clorm_fields.values():
+            try:
+                field.resolve_type()
+            except UnresolvedType:
+                has_unresolved_types = True
+        return not has_unresolved_types
 
     def __init__(self, id: int, **kwargs: Any) -> None:
         self._clorm_data = {"id": id, **kwargs}
