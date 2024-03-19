@@ -1,24 +1,24 @@
 from __future__ import annotations
-from dataclasses import dataclass, replace
+
 import enum
 import sqlite3
 import weakref
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
+from types import NoneType, UnionType
 from typing import (
+    Any,
     ClassVar,
     Generic,
-    Mapping,
     Literal,
-    TypeVar,
-    Self,
-    Any,
     Never,
-    Iterator,
-    get_origin,
-    get_args,
+    Self,
+    TypeVar,
     Union,
-    Sequence,
+    get_args,
+    get_origin,
+    overload,
 )
-from types import UnionType, NoneType
 
 T = TypeVar("T")
 
@@ -114,7 +114,7 @@ class Contains(Condition):
     values: Sequence[Any]
 
     def stringify(self) -> tuple[str, tuple[object, ...]]:
-        vals = tuple(self.left.serialize(val) for val in vals)
+        vals = tuple(self.left.serialize(val) for val in self.values)
         condition = "IN" if self.positive else "NOT IN"
         return f"({self.left.name} {condition} ?)", (vals,)
 
@@ -122,7 +122,7 @@ class Contains(Condition):
 @dataclass
 class OrderBy:
     field: Field
-    ascending: True
+    ascending: bool
 
     def stringify(self) -> str:
         direction = "ASC" if self.ascending else "DESC"
@@ -134,7 +134,7 @@ ModelT = TypeVar("ModelT", bound="Model")
 
 @dataclass
 class Query(Generic[ModelT]):
-    model: ModelT
+    model: type[ModelT]
     conditions: Sequence[Condition] = ()
     order_by_columns: Sequence[OrderBy] = ()
     limit_clause: int | None = None
@@ -160,7 +160,7 @@ class Query(Generic[ModelT]):
             order_by = ", ".join(item.stringify() for item in self.order_by_columns)
             query = f"{query} ORDER BY {order_by}"
         if self.limit_clause is not None:
-            query += f" LIMIT ?"
+            query += " LIMIT ?"
             params.append(self.limit_clause)
         return query, tuple(params)
 
@@ -193,7 +193,12 @@ class Field(Generic[T]):
         if not hasattr(self, "name"):
             self.name = name
 
-    def __get__(self, obj: Model | None, objtype: object = None) -> T:
+    @overload
+    def __get__(self, obj: None, objtype: object = None) -> Self: ...
+    @overload
+    def __get__(self, obj: Model | None, objtype: object = None) -> T: ...
+
+    def __get__(self, obj: Model | None, objtype: object = None) -> T | Self:
         if obj is None:
             return self
         raw_value = self.get_raw(obj)
@@ -231,7 +236,7 @@ class Field(Generic[T]):
         return self._typ
 
     @property
-    def allow_none(self) -> type[T]:
+    def allow_none(self) -> bool:
         if not hasattr(self, "_typ"):
             self._resolve_type()
         return self._allow_none
@@ -301,7 +306,12 @@ class EnumField(Field[EnumT]):
 
 
 class IdField(Field[int]):
-    def __get__(self, obj: Model | None, objtype: object = None) -> int:
+    @overload
+    def __get__(self, obj: None, objtype: object = None) -> Self: ...
+    @overload
+    def __get__(self, obj: Model | None, objtype: object = None) -> int: ...
+
+    def __get__(self, obj: Model | None, objtype: object = None) -> int | Self:
         if obj is None:
             return self
         return obj._clorm_data[self.name]
@@ -316,7 +326,7 @@ class Model:
 
     _clorm_fields: ClassVar[dict[str, Field]]
     _clorm_instance_cache: ClassVar[weakref.WeakValueDictionary[int, Self]]
-    _clorm_data: dict[int, Any]
+    _clorm_data: dict[str, Any]
 
     id = IdField()
 

@@ -1,7 +1,5 @@
-from .base import (
-    Clorm as Clorm,
-    Field as Field,
-    Model as Model,
-    DoesNotExist as DoesNotExist,
-    EnumField as EnumField,
-)
+from .base import Clorm as Clorm
+from .base import DoesNotExist as DoesNotExist
+from .base import EnumField as EnumField
+from .base import Field as Field
+from .base import Model as Model

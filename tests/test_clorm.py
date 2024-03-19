@@ -1,6 +1,7 @@
-from clorm import Clorm, Field, Model, EnumField
 import enum
 import sqlite3
+
+from clorm import Clorm, EnumField, Field, Model
 
 
 class Status(enum.Enum):
@@ -9,7 +10,8 @@ class Status(enum.Enum):
 
 
 def test() -> None:
-    conn = sqlite3.connect(":memory:")
+    # bug in inspect?
+    conn = sqlite3.connect(":memory:")  # static analysis: ignore[internal_error]
     conn.execute("CREATE TABLE taxon(id INTEGER PRIMARY KEY, name, extinct, status)")
     conn.commit()
 
