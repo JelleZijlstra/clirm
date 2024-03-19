@@ -84,7 +84,7 @@ class Condition:
     def __or__(self, other: Condition) -> OrCondition:
         return OrCondition(self, other)
 
-    def __inv__(self) -> NotCondition:
+    def __invert__(self) -> NotCondition:
         return NotCondition(self)
 
     def stringify(self) -> tuple[str, tuple[object, ...]]:
@@ -94,7 +94,7 @@ class Condition:
 @dataclasses.dataclass
 class Comparison(Condition):
     left: Field
-    operator: Literal["<", "<=", ">", ">=", "=", "!="]
+    operator: Literal["<", "<=", ">", ">=", "=", "!=", "INSTR"]
     right: Any
 
     def stringify(self) -> tuple[str, tuple[object, ...]]:
@@ -107,7 +107,12 @@ class Comparison(Condition):
                 case _:
                     raise TypeError("Unsupported operator")
         right = self.left.serialize(self.right)
-        return f"({self.left.name} {self.operator} ?)", (right,)
+        match self.operator:
+            case "INSTR":
+                return f"INSTR({self.left.name}, ?)", (right,)
+            case _:
+                return f"({self.left.name} {self.operator} ?)", (right,)
+        assert False, "unreachable"
 
 
 @dataclasses.dataclass
@@ -138,8 +143,9 @@ class Contains(Condition):
 
     def stringify(self) -> tuple[str, tuple[object, ...]]:
         vals = tuple(self.left.serialize(val) for val in self.values)
+        placeholders = ", ".join("?" for _ in vals)
         condition = "IN" if self.positive else "NOT IN"
-        return f"({self.left.name} {condition} ?)", (vals,)
+        return f"({self.left.name} {condition} ({placeholders}))", vals
 
 
 @dataclasses.dataclass
@@ -373,7 +379,13 @@ class Field(Generic[T]):
     def __le__(self, other: T) -> Condition:
         return Comparison(self, "<=", other)
 
-    def contains(self, other: Sequence[T]) -> Condition:
+    def contains(self, other: T) -> Condition:
+        return Comparison(self, "INSTR", other)
+
+    def is_in(self, other: Sequence[T]) -> Condition:
+        return Contains(self, True, other)
+
+    def is_not_in(self, other: Sequence[T]) -> Condition:
         return Contains(self, True, other)
 
     def asc(self) -> OrderBy:

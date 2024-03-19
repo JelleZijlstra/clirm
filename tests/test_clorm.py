@@ -240,3 +240,35 @@ def test_adt() -> None:
     assert txn.tags == ()
     txn.tags = (ADT(1),)
     assert txn.tags == (ADT(1),)
+
+
+def test_in_and_contains() -> None:
+    clorm_global = make_clorm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL)"]
+    )
+
+    class Taxon(Model):
+        clorm = clorm_global
+        clorm_table_name = "taxon"
+
+        name = Field[str]()
+
+    Taxon.create(name="Neurotrichus")
+    Taxon.create(name="Urotrichus")
+    Taxon.create(name="Uropsilus")
+
+    assert {
+        txn.name for txn in Taxon.select().filter(Taxon.name.contains("trichus"))
+    } == {"Urotrichus", "Neurotrichus"}
+    assert {
+        txn.name for txn in Taxon.select().filter(~Taxon.name.contains("trichus"))
+    } == {"Uropsilus"}
+    assert {
+        txn.name for txn in Taxon.select().filter(Taxon.name.is_in(["trichus"]))
+    } == set()
+    assert {
+        txn.name
+        for txn in Taxon.select().filter(
+            Taxon.name.is_in(["Urotrichus", "Uropsilus", "Talpa"])
+        )
+    } == {"Urotrichus", "Uropsilus"}
