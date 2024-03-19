@@ -295,14 +295,14 @@ class Field(Generic[T]):
         if hasattr(self, "__orig_class__"):
             return self.__orig_class__
         for base in self.__orig_bases__:
-            if isinstance(get_origin(base), Field):
+            if get_origin(base) is Field:
                 return base
         raise TypeError("Cannot resolve generic Field class")
 
     def resolve_type(self) -> None:
         if hasattr(self, "_type_object"):
             return
-        self._full_type, self._type_object, self._allow_none = self._get_resolved_type()
+        self._full_type, self._type_object, self._allow_none = self.get_resolved_type()
         if self.related_name is not None:
             if issubclass(self._type_object, Model):
                 if hasattr(self._type_object, self.related_name):
@@ -319,18 +319,21 @@ class Field(Generic[T]):
                     "Cannot set related_name on fields that are not foreign keys"
                 )
 
-    def _get_resolved_type(self) -> tuple[Any, type[object], bool]:
+    def resolve_forward_ref(self, arg: ForwardRef) -> Any:
+        ns = {
+            **self.model_cls.clorm.get_name_to_model_cls(),
+            **sys.modules[self.model_cls.__module__].__dict__,
+        }
+        try:
+            return eval(arg.__forward_code__, ns)
+        except (NameError, AttributeError) as e:
+            raise UnresolvedType from e
+
+    def get_resolved_type(self) -> tuple[Any, type[object], bool]:
         param = self.get_type_parameter()
         (arg,) = get_args(param)
         if isinstance(arg, ForwardRef):
-            ns = {
-                **self.model_cls.clorm.get_name_to_model_cls(),
-                **sys.modules[self.model_cls.__module__].__dict__,
-            }
-            try:
-                arg = eval(arg.__forward_code__, ns)
-            except (NameError, AttributeError) as e:
-                raise UnresolvedType from e
+            arg = self.resolve_forward_ref(arg)
         if isinstance(arg, type):
             return (arg, arg, False)
         if arg is Self or arg is typing_extensions.Self:
@@ -346,7 +349,10 @@ class Field(Generic[T]):
                     return (arg | None, arg, True)
                 elif arg is Self or arg is typing_extensions.Self:
                     return (self.model_cls | None, self.model_cls, True)
-        raise TypeError(f"Unsupported type {param}")
+        return self.resolve_type_fallback(arg)
+
+    def resolve_type_fallback(self, arg: Any) -> tuple[Any, type[object], bool]:
+        raise TypeError(f"Unsupported type {arg} for field {self}")
 
     def __eq__(self, other: T) -> Condition:
         return Comparison(self, "=", other)
@@ -375,6 +381,9 @@ class Field(Generic[T]):
     def desc(self) -> OrderBy:
         return OrderBy(self, False)
 
+    def __repr__(self) -> str:
+        return f"<Field: {self.name}>"
+
 
 def make_foreign_key_accessor(field: Field) -> Any:
     @property
@@ -385,10 +394,12 @@ def make_foreign_key_accessor(field: Field) -> Any:
 
 
 class Model:
+    # Must be set in subclasses
     clorm: ClassVar[Clorm]
     clorm_table_name: ClassVar[str]
 
-    _clorm_fields: ClassVar[dict[str, Field]]
+    # Set by the abstraction
+    clorm_fields: ClassVar[dict[str, Field]]
     _clorm_instance_cache: ClassVar[weakref.WeakValueDictionary[int, Self]]
     _clorm_has_unresolved_types: ClassVar[bool] = True
     _clorm_data: dict[str, Any]
@@ -400,7 +411,7 @@ class Model:
             return  # abstract class
 
         cls._clorm_instance_cache = weakref.WeakValueDictionary()
-        cls._clorm_fields = {}
+        cls.clorm_fields = {}
         for name, obj in cls.__dict__.items():
             if isinstance(obj, Field):
                 if not hasattr(obj, "name"):
@@ -410,7 +421,7 @@ class Model:
                         f"field {obj.name} is already associated with a class"
                     )
                 obj.model_cls = cls
-                cls._clorm_fields[name] = obj
+                cls.clorm_fields[name] = obj
         cls.clorm.models[cls.clorm_table_name] = cls
         cls.clorm.models_with_unresolved_types.add(cls)
         cls.clorm.try_resolve_all_types()
@@ -418,7 +429,7 @@ class Model:
     @classmethod
     def clorm_try_resolve_types(cls) -> bool:
         has_unresolved_types = False
-        for field in cls._clorm_fields.values():
+        for field in cls.clorm_fields.values():
             try:
                 field.resolve_type()
             except UnresolvedType:
@@ -449,7 +460,7 @@ class Model:
     def create(cls, **kwargs: Any) -> Self:
         column_names = []
         params = []
-        for name, field in cls._clorm_fields.items():
+        for name, field in cls.clorm_fields.items():
             if name in kwargs:
                 cooked_value = kwargs.pop(name)
             else:

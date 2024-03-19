@@ -1,7 +1,10 @@
 import enum
+import json
 import sqlite3
+import typing
 from collections.abc import Sequence
-from typing import Self
+from dataclasses import dataclass
+from typing import Any, Self, TypeVar
 
 import pytest
 
@@ -164,3 +167,76 @@ def test_default() -> None:
         Taxon.create(extinct=True)  # name must be given
     with pytest.raises(TypeError):
         Taxon.create(not_a_kwarg=1, name="Veratalpa")
+
+
+@dataclass
+class ADT:
+    value: int
+
+    @classmethod
+    def unserialize(cls, val: Any) -> Self:
+        return cls(val)
+
+    def serialize(self) -> Any:
+        return self.value
+
+
+ADTT = TypeVar("ADTT", bound=ADT)
+
+
+class ADTField(Field[Sequence[ADTT]]):
+    adt_type: type[ADT]
+
+    def deserialize(self, raw_value: Any) -> Sequence[ADTT]:
+        if isinstance(raw_value, str) and raw_value:
+            if not hasattr(self, "_adt_cache"):
+                self._adt_cache = {}
+            if raw_value in self._adt_cache:
+                return self._adt_cache[raw_value]
+            tags = tuple(
+                self.adt_type.unserialize(val) for val in json.loads(raw_value)
+            )
+            self._adt_cache[raw_value] = tags
+            return tags
+        else:
+            return ()
+
+    def serialize(self, value: Sequence[ADTT]) -> str | None:
+        if isinstance(value, tuple):
+            value = list(value)
+        if isinstance(value, list):
+            if value:
+                return json.dumps([val.serialize() for val in value])
+            else:
+                return None
+        elif value is None:
+            return None
+        raise TypeError(f"Unsupported type {value}")
+
+    def get_resolved_type(self) -> tuple[Any, type[object], bool]:
+        orig_class = self.__orig_class__
+        (arg,) = typing.get_args(orig_class)
+        if isinstance(arg, typing.ForwardRef):
+            arg = self.resolve_forward_ref(arg)
+        if not issubclass(arg, ADT):
+            raise TypeError(f"ADTField must be instantiated with an ADT, not {arg}")
+        self.adt_type = arg
+        return (Sequence[arg], Sequence, True)
+
+
+def test_adt() -> None:
+    clorm_global = make_clorm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL, tags)"]
+    )
+
+    class Taxon(Model):
+        clorm = clorm_global
+        clorm_table_name = "taxon"
+
+        name = Field[str]()
+        tags = ADTField[ADT]()
+
+    txn = Taxon.create(name="Neurotrichus")
+    assert txn.tags == ()
+    txn.tags = (ADT(1),)
+    assert txn.tags == (ADT(1),)
