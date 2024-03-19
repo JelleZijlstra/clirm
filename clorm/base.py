@@ -149,13 +149,21 @@ class Contains(Condition):
 
 
 @dataclasses.dataclass
+class Func:
+    name: str
+
+    def stringify(self) -> tuple[str, tuple[object, ...]]:
+        return f"{self.name}()", ()
+
+
+@dataclasses.dataclass
 class OrderBy:
     field: Field
     ascending: bool
 
-    def stringify(self) -> str:
+    def stringify(self) -> tuple[str, tuple[object, ...]]:
         direction = "ASC" if self.ascending else "DESC"
-        return f"{self.field.name} {direction}"
+        return f"{self.field.name} {direction}", ()
 
 
 ModelT = TypeVar("ModelT", bound="Model")
@@ -165,7 +173,7 @@ ModelT = TypeVar("ModelT", bound="Model")
 class Query(Generic[ModelT]):
     model: type[ModelT]
     conditions: Sequence[Condition] = ()
-    order_by_columns: Sequence[OrderBy] = ()
+    order_by_columns: Sequence[OrderBy | Func] = ()
     limit_clause: int | None = None
 
     def filter(self, *conds: Condition) -> Query:
@@ -174,7 +182,7 @@ class Query(Generic[ModelT]):
     def limit(self, limit: int) -> Query:
         return dataclasses.replace(self, limit_clause=limit)
 
-    def order_by(self, *orders: OrderBy) -> Query:
+    def order_by(self, *orders: OrderBy | Func) -> Query:
         return dataclasses.replace(
             self, order_by_columns=[*self.order_by_columns, *orders]
         )
@@ -188,7 +196,9 @@ class Query(Generic[ModelT]):
             query = f"{query} WHERE {where}"
             params += (param for _, params in pairs for param in params)
         if self.order_by_columns:
-            order_by = ", ".join(item.stringify() for item in self.order_by_columns)
+            pairs = [item.stringify() for item in self.order_by_columns]
+            order_by = ", ".join(item for item, _ in pairs)
+            params += (param for _, params in pairs for param in params)
             query = f"{query} ORDER BY {order_by}"
         if self.limit_clause is not None:
             query += " LIMIT ?"
