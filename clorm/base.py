@@ -57,26 +57,30 @@ class Clorm:
     def select_one(
         self, query: str, parameters: tuple[Any, ...] = ()
     ) -> Mapping[str, Any] | None:
-        cursor = self.conn.cursor()
-        cursor.row_factory = sqlite3.Row
-        res = cursor.execute(query, parameters)
-        return res.fetchone()
+        with self.conn:
+            cursor = self.conn.cursor()
+            cursor.row_factory = sqlite3.Row
+            res = cursor.execute(query, parameters)
+            return res.fetchone()
 
     def select(self, query: str, parameters: tuple[Any, ...] = ()) -> sqlite3.Cursor:
-        cursor = self.conn.cursor()
-        cursor.row_factory = sqlite3.Row
-        return cursor.execute(query, parameters)
+        with self.conn:
+            cursor = self.conn.cursor()
+            cursor.row_factory = sqlite3.Row
+            return cursor.execute(query, parameters)
 
     def select_tuple(self, query: str, parameters: tuple[Any, ...] = ()) -> Any:
-        cursor = self.conn.cursor()
-        res = cursor.execute(query, parameters)
-        return res.fetchone()
+        with self.conn:
+            cursor = self.conn.cursor()
+            res = cursor.execute(query, parameters)
+            return res.fetchone()
 
     def execute(self, query: str, parameters: tuple[Any, ...] = ()) -> sqlite3.Cursor:
-        cursor = self.conn.cursor()
-        res = cursor.execute(query, parameters)
-        self.conn.commit()
-        return res
+        with self.conn:
+            cursor = self.conn.cursor()
+            res = cursor.execute(query, parameters)
+            self.conn.commit()
+            return res
 
 
 class Condition:
