@@ -281,6 +281,8 @@ class Field(Generic[T]):
 
     def __set__(self, obj: Model, value: T) -> None:
         raw_value = self.serialize(value)
+        if self.name in obj._clorm_data and obj._clorm_data[self.name] == raw_value:
+            return
         self.set_raw(obj, raw_value)
 
     def serialize(self, value: T) -> Any:
@@ -401,6 +403,9 @@ class Field(Generic[T]):
     def __le__(self, other: T) -> Condition:
         return Comparison(self, "<=", other)
 
+    def __mod__(self: Field[str], other: str) -> Condition:
+        return Comparison(self, "LIKE", other)
+
     def contains(self, other: T) -> Condition:
         return Comparison(self, "INSTR", other)
 
@@ -414,7 +419,7 @@ class Field(Generic[T]):
         return Contains(self, True, other)
 
     def is_not_in(self, other: Sequence[T]) -> Condition:
-        return Contains(self, True, other)
+        return Contains(self, False, other)
 
     def asc(self) -> OrderBy:
         return OrderBy(self, True)
@@ -445,6 +450,8 @@ class Model:
     _clorm_instance_cache: ClassVar[weakref.WeakValueDictionary[int, Self]]
     _clorm_has_unresolved_types: ClassVar[bool] = True
     _clorm_data: dict[str, Any]
+
+    DoesNotExist = DoesNotExist
 
     id = Field[Id]()
 
@@ -494,20 +501,26 @@ class Model:
         return inst
 
     def load(self) -> None:
-        query = f"SELECT * FROM {self.clorm_table_name} WHERE id = ?"
+        query = f"SELECT * FROM `{self.clorm_table_name}` WHERE id = ?"
         row = self.clorm.select_one(query, (self.id,))
         if row is None:
             raise DoesNotExist(self.id)
         self._clorm_data.update(row)
 
     def save(self) -> None:
+        if not self._clorm_dirty_fields:
+            return
         updates = ", ".join(
-            f"{field_name} = ?" for field_name in self._clorm_dirty_fields
+            f"`{field_name}` = ?" for field_name in self._clorm_dirty_fields
         )
         params = [self._clorm_data[field] for field in self._clorm_dirty_fields]
-        query = f"UPDATE {self.clorm_table_name} SET {updates} WHERE id = ?"
+        query = f"UPDATE `{self.clorm_table_name}` SET {updates} WHERE id = ?"
         self.clorm.execute(query, (*params, self.id))
         self._clorm_dirty_fields.clear()
+
+    def serialize(self) -> Self:
+        self.load()
+        return self
 
     @classmethod
     def create(cls, **kwargs: Any) -> Self:
@@ -527,7 +540,10 @@ class Model:
             raise TypeError(f"Extra kwargs {', '.join(kwargs)}")
 
         placeholders = ",".join("?" for _ in column_names)
-        query = f"INSERT INTO {cls.clorm_table_name}({','.join(column_names)}) VALUES({placeholders})"
+        colnames_str = ",".join(f"`{name}`" for name in column_names)
+        query = (
+            f"INSERT INTO {cls.clorm_table_name}({colnames_str}) VALUES({placeholders})"
+        )
         cursor = cls.clorm.execute(query, tuple(params))
         return cls(cursor.lastrowid)
 
