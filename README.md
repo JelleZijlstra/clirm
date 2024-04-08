@@ -7,14 +7,14 @@ that iterate over the entire database.
 
 Features include:
 
-* Changes are always committed to the database immediately, so that
+- Changes are always committed to the database immediately, so that
   there is no need to worry about a separate later "save" step.
-* There is always only one object per database row, so that users
+- There is always only one object per database row, so that users
   do not need to worry about editing one copy and leaving another
   ORM object corresponding to the same row unchanged.
-* All columns in a row are always fetched together, to simplify
+- All columns in a row are always fetched together, to simplify
   implementation of the above point.
-* Tight integration with the type system. Fields can be declared
+- Tight integration with the type system. Fields can be declared
   as `Field[T]()`, where `T` is a normal Python type.
 
 Clirm requires that every table has an `id` column containing
@@ -74,14 +74,14 @@ if __name__ == "__main__":
 
 The following field types are currently supported:
 
-* Primitive types, e.g., `int`, `str`, `bool`, which are passed
+- Primitive types, e.g., `int`, `str`, `bool`, which are passed
   directly to the database
-* Enums, which are converted to their value before being passed to
+- Enums, which are converted to their value before being passed to
   the database
-* Foreign keys to other clirm models, which are stored as their
+- Foreign keys to other clirm models, which are stored as their
   IDs
-* Foreign keys to the current class, which can be expressed with `typing.Self`
-* Nullable versions of any of the above, expressed by adding `| None`
+- Foreign keys to the current class, which can be expressed with `typing.Self`
+- Nullable versions of any of the above, expressed by adding `| None`
   to the type
 
 Additional types can be supported by subclassing `Field` and overriding
