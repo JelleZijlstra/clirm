@@ -27,7 +27,7 @@ repos:
         name: pyanalyze
         entry: python3.11 -m pyanalyze --config-file pyproject.toml
         language: python
-        files: ^(clorm|tests)/.*\.py$
+        files: ^(clirm|tests)/.*\.py$
         additional_dependencies:
           - pyanalyze>=0.10.1
           - pytest

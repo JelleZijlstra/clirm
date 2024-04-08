@@ -1,4 +1,4 @@
-from .base import Clorm as Clorm
+from .base import Clirm as Clirm
 from .base import DoesNotExist as DoesNotExist
 from .base import Field as Field
 from .base import Func as Func

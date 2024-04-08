@@ -37,7 +37,7 @@ class UnresolvedType(Exception):
 
 
 @dataclasses.dataclass
-class Clorm:
+class Clirm:
     conn: sqlite3.Connection
     models: dict[str, type[Model]] = dataclasses.field(default_factory=dict)
     models_with_unresolved_types: set[type[Model]] = dataclasses.field(
@@ -51,7 +51,7 @@ class Clorm:
         self.models_with_unresolved_types = {
             model
             for model in self.models_with_unresolved_types
-            if not model.clorm_try_resolve_types()
+            if not model.clirm_try_resolve_types()
         }
 
     def select_one(
@@ -199,7 +199,7 @@ class Query(Generic[ModelT]):
         )
 
     def stringify(self, columns: str = "*") -> tuple[str, tuple[object, ...]]:
-        query = f"SELECT {columns} FROM {self.model.clorm_table_name}"
+        query = f"SELECT {columns} FROM {self.model.clirm_table_name}"
         params: list[object] = []
         if self.conditions:
             pairs = [cond.stringify() for cond in self.conditions]
@@ -218,7 +218,7 @@ class Query(Generic[ModelT]):
 
     def count(self) -> int:
         query, params = self.stringify("COUNT(*)")
-        (count,) = self.model.clorm.select_tuple(query, params)
+        (count,) = self.model.clirm.select_tuple(query, params)
         return count
 
     def get(self) -> ModelT:
@@ -228,7 +228,7 @@ class Query(Generic[ModelT]):
 
     def __iter__(self) -> Iterator[ModelT]:
         query, params = self.stringify()
-        cursor = self.model.clorm.select(query, params)
+        cursor = self.model.clirm.select(query, params)
         while True:
             rows = cursor.fetchmany()
             if not rows:
@@ -279,13 +279,13 @@ class Field(Generic[T]):
         return self.type_object(raw_value)
 
     def get_raw(self, obj: Model) -> Any:
-        if self.name not in obj._clorm_data:
+        if self.name not in obj._clirm_data:
             obj.load()
-        return obj._clorm_data[self.name]
+        return obj._clirm_data[self.name]
 
     def __set__(self, obj: Model, value: T) -> None:
         raw_value = self.serialize(value)
-        if self.name in obj._clorm_data and obj._clorm_data[self.name] == raw_value:
+        if self.name in obj._clirm_data and obj._clirm_data[self.name] == raw_value:
             return
         self.set_raw(obj, raw_value)
 
@@ -307,8 +307,8 @@ class Field(Generic[T]):
     def set_raw(self, obj: Model, value: Any) -> None:
         if self.full_type is Id:
             raise AttributeError("Cannot set id field")
-        obj._clorm_data[self.name] = value
-        obj._clorm_dirty_fields.add(self.name)
+        obj._clirm_data[self.name] = value
+        obj._clirm_dirty_fields.add(self.name)
         obj.save()
 
     @property
@@ -340,7 +340,7 @@ class Field(Generic[T]):
         self._full_type, self._type_object, self._allow_none = self.get_resolved_type()
         if issubclass(self._type_object, Model):
             if self.related_name is None:
-                self.related_name = self.model_cls.clorm_table_name + "_set"
+                self.related_name = self.model_cls.clirm_table_name + "_set"
             if hasattr(self._type_object, self.related_name):
                 raise TypeError(
                     f"{self._type_object} already has an attribute {self.related_name}; cannot set related_name for {self}"
@@ -348,7 +348,7 @@ class Field(Generic[T]):
             setattr(
                 self._type_object, self.related_name, make_foreign_key_accessor(self)
             )
-            self._type_object.clorm_backrefs.append(self)
+            self._type_object.clirm_backrefs.append(self)
         elif self.related_name is not None:
             raise TypeError(
                 "Cannot set related_name on fields that are not foreign keys"
@@ -356,7 +356,7 @@ class Field(Generic[T]):
 
     def resolve_forward_ref(self, arg: ForwardRef) -> Any:
         ns = {
-            **self.model_cls.clorm.get_name_to_model_cls(),
+            **self.model_cls.clirm.get_name_to_model_cls(),
             **sys.modules[self.model_cls.__module__].__dict__,
         }
         try:
@@ -445,27 +445,27 @@ def make_foreign_key_accessor(field: Field[Any]) -> Any:
 
 class Model:
     # Must be set in subclasses
-    clorm: ClassVar[Clorm]
-    clorm_table_name: ClassVar[str]
+    clirm: ClassVar[Clirm]
+    clirm_table_name: ClassVar[str]
 
     # Set by the abstraction
-    clorm_fields: ClassVar[dict[str, Field[Any]]]
-    clorm_backrefs: list[Field[Any]]
-    _clorm_instance_cache: ClassVar[weakref.WeakValueDictionary[int, Self]]
-    _clorm_has_unresolved_types: ClassVar[bool] = True
-    _clorm_data: dict[str, Any]
+    clirm_fields: ClassVar[dict[str, Field[Any]]]
+    clirm_backrefs: list[Field[Any]]
+    _clirm_instance_cache: ClassVar[weakref.WeakValueDictionary[int, Self]]
+    _clirm_has_unresolved_types: ClassVar[bool] = True
+    _clirm_data: dict[str, Any]
 
     DoesNotExist = DoesNotExist
 
     id = Field[Id]()
 
     def __init_subclass__(cls) -> None:
-        if not hasattr(cls, "clorm_table_name"):
+        if not hasattr(cls, "clirm_table_name"):
             return  # abstract class
 
-        cls._clorm_instance_cache = weakref.WeakValueDictionary()
-        cls.clorm_fields = {}
-        cls.clorm_backrefs = []
+        cls._clirm_instance_cache = weakref.WeakValueDictionary()
+        cls.clirm_fields = {}
+        cls.clirm_backrefs = []
         for name, obj in cls.__dict__.items():
             if isinstance(obj, Field):
                 if not hasattr(obj, "name"):
@@ -475,15 +475,15 @@ class Model:
                         f"field {obj.name} is already associated with a class"
                     )
                 obj.model_cls = cls
-                cls.clorm_fields[name] = obj
-        cls.clorm.models[cls.clorm_table_name] = cls
-        cls.clorm.models_with_unresolved_types.add(cls)
-        cls.clorm.try_resolve_all_types()
+                cls.clirm_fields[name] = obj
+        cls.clirm.models[cls.clirm_table_name] = cls
+        cls.clirm.models_with_unresolved_types.add(cls)
+        cls.clirm.try_resolve_all_types()
 
     @classmethod
-    def clorm_try_resolve_types(cls) -> bool:
+    def clirm_try_resolve_types(cls) -> bool:
         has_unresolved_types = False
-        for field in cls.clorm_fields.values():
+        for field in cls.clirm_fields.values():
             try:
                 field.resolve_type()
             except UnresolvedType:
@@ -491,36 +491,36 @@ class Model:
         return not has_unresolved_types
 
     def __init__(self, id: int, **kwargs: Any) -> None:
-        self._clorm_data = {"id": id, **kwargs}
-        self._clorm_dirty_fields = set()
+        self._clirm_data = {"id": id, **kwargs}
+        self._clirm_dirty_fields = set()
 
     def __new__(cls, id: int, **kwargs: Any) -> Self:
-        if id in cls._clorm_instance_cache:
-            inst = cls._clorm_instance_cache[id]
-            inst._clorm_data.update(kwargs)
+        if id in cls._clirm_instance_cache:
+            inst = cls._clirm_instance_cache[id]
+            inst._clirm_data.update(kwargs)
         else:
             inst = super().__new__(cls)
             inst.__init__(id, **kwargs)
-            cls._clorm_instance_cache[id] = inst
+            cls._clirm_instance_cache[id] = inst
         return inst
 
     def load(self) -> None:
-        query = f"SELECT * FROM `{self.clorm_table_name}` WHERE id = ?"
-        row = self.clorm.select_one(query, (self.id,))
+        query = f"SELECT * FROM `{self.clirm_table_name}` WHERE id = ?"
+        row = self.clirm.select_one(query, (self.id,))
         if row is None:
             raise DoesNotExist(self.id)
-        self._clorm_data.update(row)
+        self._clirm_data.update(row)
 
     def save(self) -> None:
-        if not self._clorm_dirty_fields:
+        if not self._clirm_dirty_fields:
             return
         updates = ", ".join(
-            f"`{field_name}` = ?" for field_name in self._clorm_dirty_fields
+            f"`{field_name}` = ?" for field_name in self._clirm_dirty_fields
         )
-        params = [self._clorm_data[field] for field in self._clorm_dirty_fields]
-        query = f"UPDATE `{self.clorm_table_name}` SET {updates} WHERE id = ?"
-        self.clorm.execute(query, (*params, self.id))
-        self._clorm_dirty_fields.clear()
+        params = [self._clirm_data[field] for field in self._clirm_dirty_fields]
+        query = f"UPDATE `{self.clirm_table_name}` SET {updates} WHERE id = ?"
+        self.clirm.execute(query, (*params, self.id))
+        self._clirm_dirty_fields.clear()
 
     def serialize(self) -> Self:
         self.load()
@@ -530,7 +530,7 @@ class Model:
     def create(cls, **kwargs: Any) -> Self:
         column_names: list[str] = []
         params: list[object] = []
-        for name, field in cls.clorm_fields.items():
+        for name, field in cls.clirm_fields.items():
             if name in kwargs:
                 cooked_value = kwargs.pop(name)
             else:
@@ -546,9 +546,9 @@ class Model:
         placeholders = ",".join("?" for _ in column_names)
         colnames_str = ",".join(f"`{name}`" for name in column_names)
         query = (
-            f"INSERT INTO {cls.clorm_table_name}({colnames_str}) VALUES({placeholders})"
+            f"INSERT INTO {cls.clirm_table_name}({colnames_str}) VALUES({placeholders})"
         )
-        cursor = cls.clorm.execute(query, tuple(params))
+        cursor = cls.clirm.execute(query, tuple(params))
         assert cursor.lastrowid is not None
         return cls(cursor.lastrowid)
 
@@ -565,5 +565,5 @@ class Model:
         return cls.select().filter(*conditions, **kwargs).get()
 
     def delete_instance(self) -> None:
-        query = f"DELETE FROM {self.clorm_table_name} WHERE id = ?"
-        self.clorm.execute(query, (self.id,))
+        query = f"DELETE FROM {self.clirm_table_name} WHERE id = ?"
+        self.clirm.execute(query, (self.id,))

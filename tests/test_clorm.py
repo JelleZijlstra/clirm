@@ -8,7 +8,7 @@ from typing import Any, Self, TypeVar
 
 import pytest
 
-from clorm import Clorm, Field, Model
+from clirm import Clirm, Field, Model
 
 
 class Status(enum.Enum):
@@ -16,24 +16,24 @@ class Status(enum.Enum):
     nomen_dubium = 2
 
 
-def make_clorm(tables: Sequence[str]) -> Clorm:
+def make_clirm(tables: Sequence[str]) -> Clirm:
     # bug in inspect?
     conn = sqlite3.connect(":memory:")  # static analysis: ignore[internal_error]
     for table in tables:
         conn.execute(table)
     conn.commit()
 
-    return Clorm(conn)
+    return Clirm(conn)
 
 
 def test() -> None:
-    clorm_global = make_clorm(
+    clirm_global = make_clirm(
         ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name, extinct, status)"]
     )
 
     class Taxon(Model):
-        clorm = clorm_global
-        clorm_table_name = "taxon"
+        clirm = clirm_global
+        clirm_table_name = "taxon"
 
         name = Field[str]()
         extinct = Field[bool]()
@@ -93,7 +93,7 @@ def test_foreign_key() -> None:
     conn.execute("CREATE TABLE taxon(id INTEGER PRIMARY KEY, name, extinct, status)")
     conn.commit()
 
-    clorm_global = make_clorm(
+    clirm_global = make_clirm(
         [
             "CREATE TABLE taxon(id INTEGER PRIMARY KEY, parent, valid_name, base_name)",
             "CREATE TABLE name(id INTEGER PRIMARY KEY, taxon, root_name)",
@@ -101,15 +101,15 @@ def test_foreign_key() -> None:
     )
 
     class Name(Model):
-        clorm = clorm_global
-        clorm_table_name = "name"
+        clirm = clirm_global
+        clirm_table_name = "name"
 
         taxon = Field["Taxon"](related_name="names")
         root_name = Field[str]()
 
     class Taxon(Model):
-        clorm = clorm_global
-        clorm_table_name = "taxon"
+        clirm = clirm_global
+        clirm_table_name = "taxon"
 
         valid_name = Field[str]()
         parent = Field[Self | None](related_name="children")
@@ -134,15 +134,15 @@ def test_foreign_key() -> None:
 
 
 def test_default() -> None:
-    clorm_global = make_clorm(
+    clirm_global = make_clirm(
         [
             "CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL, is_extinct, status)"
         ]
     )
 
     class Taxon(Model):
-        clorm = clorm_global
-        clorm_table_name = "taxon"
+        clirm = clirm_global
+        clirm_table_name = "taxon"
 
         name = Field[str]()
         extinct = Field[bool]("is_extinct", default=False)
@@ -225,13 +225,13 @@ class ADTField(Field[Sequence[ADTT]]):
 
 
 def test_adt() -> None:
-    clorm_global = make_clorm(
+    clirm_global = make_clirm(
         ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL, tags)"]
     )
 
     class Taxon(Model):
-        clorm = clorm_global
-        clorm_table_name = "taxon"
+        clirm = clirm_global
+        clirm_table_name = "taxon"
 
         name = Field[str]()
         tags = ADTField[ADT]()
@@ -243,13 +243,13 @@ def test_adt() -> None:
 
 
 def test_in_and_contains() -> None:
-    clorm_global = make_clorm(
+    clirm_global = make_clirm(
         ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL)"]
     )
 
     class Taxon(Model):
-        clorm = clorm_global
-        clorm_table_name = "taxon"
+        clirm = clirm_global
+        clirm_table_name = "taxon"
 
         name = Field[str]()
 

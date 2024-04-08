@@ -1,6 +1,6 @@
-# clorm
+# clirm
 
-Command-Line ORM (clorm) is a library for creating simple ORMs that
+Command-Line ORM (clirm) is a library for creating simple ORMs that
 can be used in command-line programs that allow users to manipulate
 objects in an interactive context, and that also regularly run scripts
 that iterate over the entire database.
@@ -17,7 +17,7 @@ Features include:
 * Tight integration with the type system. Fields can be declared
   as `Field[T]()`, where `T` is a normal Python type.
 
-Clorm requires that every table has an `id` column containing
+Clirm requires that every table has an `id` column containing
 a unique identifier.
 
 ## Usage
@@ -30,18 +30,18 @@ import enum
 import sqlite3
 from typing import Self
 
-from clorm import Clorm, Field, Model
+from clirm import Clirm, Field, Model
 
 class Status(enum.Enum):
     living = 1
     recently_extinct = 2
     fossil = 3
 
-CLORM = Clorm(sqlite3.connect("taxon.db"))
+CLIRM = Clirm(sqlite3.connect("taxon.db"))
 
 class Taxon(Model):
-    clorm = CLORM
-    clorm_table_name = "taxon"
+    clirm = CLIRM
+    clirm_table_name = "taxon"
 
     name = Field[str]()  # string field
     status = Field[Status]()  # enum field
@@ -78,7 +78,7 @@ The following field types are currently supported:
   directly to the database
 * Enums, which are converted to their value before being passed to
   the database
-* Foreign keys to other clorm models, which are stored as their
+* Foreign keys to other clirm models, which are stored as their
   IDs
 * Foreign keys to the current class, which can be expressed with `typing.Self`
 * Nullable versions of any of the above, expressed by adding `| None`

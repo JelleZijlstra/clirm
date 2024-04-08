@@ -12,7 +12,7 @@ requires = ["flit_core >=3.4,<4"]
 build-backend = "flit_core.buildapi"
 
 [project]
-name = "clorm"
+name = "clirm"
 version = "0.0"
 description = "Command line-oriented ORM."
 requires-python = ">=3.11"
