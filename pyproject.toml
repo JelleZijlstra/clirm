@@ -15,7 +15,7 @@ build-backend = "flit_core.buildapi"
 name = "clirm"
 version = "0.1"
 description = "Command line-oriented ORM."
-long_description_content_type = "text/markdown"
+readme = "README.md"
 requires-python = ">=3.11"
 authors = [
   { name = "Jelle Zijlstra", email = "jelle.zijlstra@gmail.com" },
