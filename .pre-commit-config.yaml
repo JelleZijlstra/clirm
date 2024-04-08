@@ -25,7 +25,7 @@ repos:
     hooks:
       - id: pyanalyze
         name: pyanalyze
-        entry: python3.11 -m pyanalyze --config-file pyproject.toml
+        entry: python -m pyanalyze --config-file pyproject.toml
         language: python
         files: ^(clirm|tests)/.*\.py$
         additional_dependencies:
