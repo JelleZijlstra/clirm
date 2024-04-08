@@ -187,7 +187,7 @@ class Query(Generic[ModelT]):
             self, conditions=[*self.conditions, *conds, *kwargs_conds]
         )
 
-    def limit(self, limit: int) -> Query[ModelT]:
+    def limit(self, limit: int | None) -> Query[ModelT]:
         return dataclasses.replace(self, limit_clause=limit)
 
     def order_by(self, *orders: OrderBy | Field[object] | Func) -> Query[ModelT]:
