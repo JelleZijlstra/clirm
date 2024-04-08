@@ -47,10 +47,10 @@ class Clorm:
     def get_name_to_model_cls(self) -> dict[str, type[Model]]:
         return {cls.__name__: cls for cls in self.models.values()}
 
-    def try_resolve_all_types(cls) -> None:
-        cls.models_with_unresolved_types = {
+    def try_resolve_all_types(self) -> None:
+        self.models_with_unresolved_types = {
             model
-            for model in cls.models_with_unresolved_types
+            for model in self.models_with_unresolved_types
             if not model.clorm_try_resolve_types()
         }
 
@@ -96,7 +96,7 @@ class Condition:
 
 @dataclasses.dataclass
 class Comparison(Condition):
-    left: Field
+    left: Field[Any]
     operator: Literal["<", "<=", ">", ">=", "=", "!=", "INSTR", "LIKE"]
     right: Any
 
@@ -161,7 +161,7 @@ class Func:
 
 @dataclasses.dataclass
 class OrderBy:
-    field: Field
+    field: Field[Any]
     ascending: bool
 
     def stringify(self) -> tuple[str, tuple[object, ...]]:
@@ -179,7 +179,7 @@ class Query(Generic[ModelT]):
     order_by_columns: Sequence[OrderBy | Func] = ()
     limit_clause: int | None = None
 
-    def filter(self, *conds: Condition, **kwargs: Any) -> Query:
+    def filter(self, *conds: Condition, **kwargs: Any) -> Query[ModelT]:
         kwargs_conds = [
             getattr(self.model, key) == value for key, value in kwargs.items()
         ]
@@ -187,20 +187,20 @@ class Query(Generic[ModelT]):
             self, conditions=[*self.conditions, *conds, *kwargs_conds]
         )
 
-    def limit(self, limit: int) -> Query:
+    def limit(self, limit: int) -> Query[ModelT]:
         return dataclasses.replace(self, limit_clause=limit)
 
-    def order_by(self, *orders: OrderBy | Field[object] | Func) -> Query:
-        orders = [
+    def order_by(self, *orders: OrderBy | Field[object] | Func) -> Query[ModelT]:
+        clauses = [
             OrderBy(item, True) if isinstance(item, Field) else item for item in orders
         ]
         return dataclasses.replace(
-            self, order_by_columns=[*self.order_by_columns, *orders]
+            self, order_by_columns=[*self.order_by_columns, *clauses]
         )
 
     def stringify(self, columns: str = "*") -> tuple[str, tuple[object, ...]]:
         query = f"SELECT {columns} FROM {self.model.clorm_table_name}"
-        params = []
+        params: list[object] = []
         if self.conditions:
             pairs = [cond.stringify() for cond in self.conditions]
             where = " AND ".join(cond for cond, _ in pairs)
@@ -435,7 +435,7 @@ class Field(Generic[T]):
         return f"<Field: {self.name}>"
 
 
-def make_foreign_key_accessor(field: Field) -> Any:
+def make_foreign_key_accessor(field: Field[Any]) -> Any:
     @property
     def accessor(self: Any) -> Query[field.model_cls]:
         return field.model_cls.select().filter(field == self)
@@ -449,8 +449,8 @@ class Model:
     clorm_table_name: ClassVar[str]
 
     # Set by the abstraction
-    clorm_fields: ClassVar[dict[str, Field]]
-    clorm_backrefs: list[Field]
+    clorm_fields: ClassVar[dict[str, Field[Any]]]
+    clorm_backrefs: list[Field[Any]]
     _clorm_instance_cache: ClassVar[weakref.WeakValueDictionary[int, Self]]
     _clorm_has_unresolved_types: ClassVar[bool] = True
     _clorm_data: dict[str, Any]
@@ -528,8 +528,8 @@ class Model:
 
     @classmethod
     def create(cls, **kwargs: Any) -> Self:
-        column_names = []
-        params = []
+        column_names: list[str] = []
+        params: list[object] = []
         for name, field in cls.clorm_fields.items():
             if name in kwargs:
                 cooked_value = kwargs.pop(name)
@@ -549,6 +549,7 @@ class Model:
             f"INSERT INTO {cls.clorm_table_name}({colnames_str}) VALUES({placeholders})"
         )
         cursor = cls.clorm.execute(query, tuple(params))
+        assert cursor.lastrowid is not None
         return cls(cursor.lastrowid)
 
     @classmethod
