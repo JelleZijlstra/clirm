@@ -90,3 +90,9 @@ the `deserialize` and `serialize` methods.
 ## Backends
 
 For now only SQLite is supported as a backend.
+
+## Changelog
+
+Version 0.1 (April 8, 2024)
+
+- Initial release
