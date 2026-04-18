@@ -190,7 +190,7 @@ class Query(Generic[ModelT]):
     def limit(self, limit: int | None) -> Query[ModelT]:
         return dataclasses.replace(self, limit_clause=limit)
 
-    def order_by(self, *orders: OrderBy | Field[object] | Func) -> Query[ModelT]:
+    def order_by(self, *orders: OrderBy | Field[Any] | Func) -> Query[ModelT]:
         clauses = [
             OrderBy(item, True) if isinstance(item, Field) else item for item in orders
         ]
