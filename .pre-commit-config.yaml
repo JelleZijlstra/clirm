@@ -23,11 +23,11 @@ repos:
 
   - repo: local
     hooks:
-      - id: pyanalyze
-        name: pyanalyze
-        entry: python -m pyanalyze --config-file pyproject.toml
+      - id: pycroscope
+        name: pycroscope
+        entry: python -m pycroscope --config-file pyproject.toml
         language: python
         files: ^(clirm|tests)/.*\.py$
         additional_dependencies:
-          - pyanalyze>=0.10.1
+          - git+https://github.com/JelleZijlstra/pycroscope@a62366e35ee38fc253fa6a98f75f63d771fdea4c
           - pytest
