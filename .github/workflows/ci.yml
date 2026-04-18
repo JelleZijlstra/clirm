@@ -12,15 +12,15 @@ jobs:
       fail-fast: false
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
 
       - name: Set up latest Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Run pre-commit hooks
-        uses: pre-commit/action@v3.0.0
+        uses: pre-commit/action@v3.0.1
 
   tests:
     name: unit tests
@@ -32,8 +32,8 @@ jobs:
         python-version: ["3.11", "3.12"]
       fail-fast: false
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
