@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import os
 import sqlite3
 import sys
 import weakref
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from types import NoneType, UnionType
 from typing import (
     Any,
@@ -36,6 +38,21 @@ class UnresolvedType(Exception):
     """Raised when a field's type has not yet been resolved."""
 
 
+class ReadOnlyError(RuntimeError):
+    """Raised when a database write is attempted in read-only mode."""
+
+
+def _read_only_from_environment() -> bool:
+    value = os.environ.get("CLIRM_READONLY", "")
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+_global_read_only_depth = 0
+_clirm_instances: weakref.WeakValueDictionary[int, Clirm] = (
+    weakref.WeakValueDictionary()
+)
+
+
 @dataclasses.dataclass
 class Clirm:
     conn: sqlite3.Connection
@@ -43,6 +60,54 @@ class Clirm:
     models_with_unresolved_types: set[type[Model]] = dataclasses.field(
         default_factory=set
     )
+    _read_only_depth: int = dataclasses.field(default=0, init=False, repr=False)
+    _read_only_from_environment: bool = dataclasses.field(
+        default_factory=_read_only_from_environment, init=False, repr=False
+    )
+    _query_only_restore: bool | None = dataclasses.field(
+        default=None, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        _clirm_instances[id(self)] = self
+        self._sync_query_only()
+
+    @property
+    def is_read_only(self) -> bool:
+        """Whether writes to this database are currently disabled."""
+        return (
+            self._read_only_from_environment
+            or _global_read_only_depth > 0
+            or self._read_only_depth > 0
+        )
+
+    def _sync_query_only(self) -> None:
+        if self.is_read_only and self._query_only_restore is None:
+            (query_only,) = self.conn.execute("PRAGMA query_only").fetchone()
+            self._query_only_restore = bool(query_only)
+            if not self._query_only_restore:
+                self.conn.execute("PRAGMA query_only = ON")
+        elif not self.is_read_only and self._query_only_restore is not None:
+            if not self._query_only_restore:
+                self.conn.execute("PRAGMA query_only = OFF")
+            self._query_only_restore = None
+
+    def check_writable(self) -> None:
+        """Raise ReadOnlyError if this database is currently read-only."""
+        self._sync_query_only()
+        if self.is_read_only:
+            raise ReadOnlyError("Database writes are disabled in read-only mode")
+
+    @contextmanager
+    def readonly(self) -> Generator[None]:
+        """Temporarily disable writes to this database."""
+        self._read_only_depth += 1
+        try:
+            self._sync_query_only()
+            yield
+        finally:
+            self._read_only_depth -= 1
+            self._sync_query_only()
 
     def get_name_to_model_cls(self) -> dict[str, type[Model]]:
         return {cls.__name__: cls for cls in self.models.values()}
@@ -76,11 +141,28 @@ class Clirm:
             return res.fetchone()
 
     def execute(self, query: str, parameters: tuple[Any, ...] = ()) -> sqlite3.Cursor:
+        self.check_writable()
         with self.conn:
             cursor = self.conn.cursor()
             res = cursor.execute(query, parameters)
             self.conn.commit()
             return res
+
+
+@contextmanager
+def readonly() -> Generator[None]:
+    """Temporarily disable writes through every Clirm database."""
+    global _global_read_only_depth
+
+    _global_read_only_depth += 1
+    try:
+        for clirm in list(_clirm_instances.values()):
+            clirm._sync_query_only()
+        yield
+    finally:
+        _global_read_only_depth -= 1
+        for clirm in list(_clirm_instances.values()):
+            clirm._sync_query_only()
 
 
 class Condition:
@@ -307,6 +389,7 @@ class Field(Generic[T]):
     def set_raw(self, obj: Model, value: Any) -> None:
         if self.full_type is Id:
             raise AttributeError("Cannot set id field")
+        obj.clirm.check_writable()
         obj._clirm_data[self.name] = value
         obj._clirm_dirty_fields.add(self.name)
         obj.save()
@@ -517,6 +600,7 @@ class Model:
     def save(self) -> None:
         if not self._clirm_dirty_fields:
             return
+        self.clirm.check_writable()
         updates = ", ".join(
             f"`{field_name}` = ?" for field_name in self._clirm_dirty_fields
         )
@@ -531,6 +615,7 @@ class Model:
 
     @classmethod
     def create(cls, **kwargs: Any) -> Self:
+        cls.clirm.check_writable()
         column_names: list[str] = []
         params: list[object] = []
         for name, field in cls.clirm_fields.items():
@@ -568,5 +653,6 @@ class Model:
         return cls.select().filter(*conditions, **kwargs).get()
 
     def delete_instance(self) -> None:
+        self.clirm.check_writable()
         query = f"DELETE FROM {self.clirm_table_name} WHERE id = ?"
         self.clirm.execute(query, (self.id,))

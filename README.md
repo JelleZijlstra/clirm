@@ -87,6 +87,33 @@ The following field types are currently supported:
 Additional types can be supported by subclassing `Field` and overriding
 the `deserialize` and `serialize` methods.
 
+## Read-only mode
+
+Set `CLIRM_READONLY=1` to make all `Clirm` databases created by the process
+read-only. The values `0`, `false`, `no`, and `off` (case-insensitive), as well
+as an unset or empty variable, leave writes enabled; any other nonempty value
+enables read-only mode.
+
+Read-only mode can also be enabled temporarily in code, either for every
+database or for a single `Clirm` instance:
+
+```python
+from clirm import ReadOnlyError, readonly
+
+with readonly():
+    # Writes through any Clirm instance raise ReadOnlyError.
+    inspect_all_databases()
+
+with CLIRM.readonly():
+    # Only writes to CLIRM are disabled.
+    inspect_taxa()
+```
+
+Both context managers are nestable. Reads continue to work. SQLite's
+`query_only` mode is enabled for the connection while a read-only context is
+active, so writes attempted directly through `Clirm.conn` are also rejected.
+The original `query_only` setting is restored on exit.
+
 ## Backends
 
 For now only SQLite is supported as a backend.
