@@ -27,6 +27,7 @@ repos:
         name: pycroscope
         entry: python -m pycroscope --config-file pyproject.toml
         language: python
+        pass_filenames: false
         files: ^(clirm|tests)/.*\.py$
         additional_dependencies:
           - git+https://github.com/JelleZijlstra/pycroscope@a62366e35ee38fc253fa6a98f75f63d771fdea4c

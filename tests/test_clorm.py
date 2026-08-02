@@ -116,19 +116,19 @@ def test_foreign_key() -> None:
         base_name = Field[Name | None]()
 
     txn = Taxon.create(valid_name="Talpidae")
-    assert txn.children.count() == 0
-    assert txn.names.count() == 0
+    assert txn.children.count() == 0  # static analysis: ignore[undefined_attribute]
+    assert txn.names.count() == 0  # static analysis: ignore[undefined_attribute]
     assert txn.parent is None
     assert txn.base_name is None
     txn2 = Taxon.create(valid_name="Neurotrichus", parent=txn)
-    assert txn.children.count() == 1
+    assert txn.children.count() == 1  # static analysis: ignore[undefined_attribute]
     assert txn2.parent is txn
     assert txn2.base_name is None
 
     nam = Name.create(taxon=txn, root_name="Talp")
     assert nam.taxon is txn
     assert nam.root_name == "Talp"
-    assert txn.names.count() == 1
+    assert txn.names.count() == 1  # static analysis: ignore[undefined_attribute]
     txn.base_name = nam
     assert txn.base_name is nam
 
