@@ -190,7 +190,7 @@ class Query(Generic[ModelT]):
     def limit(self, limit: int | None) -> Query[ModelT]:
         return dataclasses.replace(self, limit_clause=limit)
 
-    def order_by(self, *orders: OrderBy | Field[object] | Func) -> Query[ModelT]:
+    def order_by(self, *orders: OrderBy | Field[Any] | Func) -> Query[ModelT]:
         clauses = [
             OrderBy(item, True) if isinstance(item, Field) else item for item in orders
         ]
@@ -255,7 +255,7 @@ class Field(Generic[T]):
     ) -> None:
         if name is not None:
             self.name = name
-        self.default = default
+        self.default = default  # static analysis: ignore[incompatible_assignment]
         self.related_name = related_name
 
     def __set_name__(self, owner: object, name: str) -> None:
@@ -348,6 +348,7 @@ class Field(Generic[T]):
             setattr(
                 self._type_object, self.related_name, make_foreign_key_accessor(self)
             )
+            # static analysis: ignore[undefined_attribute]
             self._type_object.clirm_backrefs.append(self)
         elif self.related_name is not None:
             raise TypeError(
@@ -437,7 +438,9 @@ class Field(Generic[T]):
 
 def make_foreign_key_accessor(field: Field[Any]) -> Any:
     @property
-    def accessor(self: Any) -> Query[field.model_cls]:
+    def accessor(
+        self: Any,
+    ) -> Query[field.model_cls]:  # static analysis: ignore[invalid_annotation]
         return field.model_cls.select().filter(field == self)
 
     return accessor
