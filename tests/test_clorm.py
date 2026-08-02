@@ -8,7 +8,7 @@ from typing import Any, Self, TypeVar
 
 import pytest
 
-from clirm import Clirm, Field, Model
+from clirm import Clirm, Field, Model, ReadOnlyError, readonly
 
 
 class Status(enum.Enum):
@@ -272,3 +272,166 @@ def test_in_and_contains() -> None:
             Taxon.name.is_in(["Urotrichus", "Uropsilus", "Talpa"])
         )
     } == {"Urotrichus", "Uropsilus"}
+
+
+def test_database_readonly() -> None:
+    clirm_global = make_clirm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL)"]
+    )
+
+    class Taxon(Model):
+        clirm = clirm_global
+        clirm_table_name = "taxon"
+
+        name = Field[str]()
+
+    txn = Taxon.create(name="Neurotrichus")
+    with clirm_global.readonly():
+        assert clirm_global.is_read_only
+        assert Taxon.get(Taxon.name == "Neurotrichus") is txn
+
+        with pytest.raises(ReadOnlyError):
+            Taxon.create(name="Urotrichus")
+        with pytest.raises(ReadOnlyError):
+            txn.name = "Urotrichus"
+        assert txn.name == "Neurotrichus"
+        with pytest.raises(ReadOnlyError):
+            txn.delete_instance()
+        with pytest.raises(ReadOnlyError):
+            clirm_global.execute("DELETE FROM taxon")
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            clirm_global.conn.execute("DELETE FROM taxon")
+
+        with clirm_global.readonly():
+            assert clirm_global.is_read_only
+        assert clirm_global.is_read_only
+
+    assert not clirm_global.is_read_only
+    txn.name = "Urotrichus"
+    assert txn.name == "Urotrichus"
+
+
+def test_global_readonly() -> None:
+    first_clirm = make_clirm(
+        ["CREATE TABLE first_model(id INTEGER PRIMARY KEY, name NOT NULL)"]
+    )
+    second_clirm = make_clirm(
+        ["CREATE TABLE second_model(id INTEGER PRIMARY KEY, name NOT NULL)"]
+    )
+
+    class FirstModel(Model):
+        clirm = first_clirm
+        clirm_table_name = "first_model"
+
+        name = Field[str]()
+
+    class SecondModel(Model):
+        clirm = second_clirm
+        clirm_table_name = "second_model"
+
+        name = Field[str]()
+
+    with readonly():
+        assert first_clirm.is_read_only
+        assert second_clirm.is_read_only
+        with pytest.raises(ReadOnlyError):
+            FirstModel.create(name="first")
+        with pytest.raises(ReadOnlyError):
+            SecondModel.create(name="second")
+
+        third_clirm = make_clirm(
+            ["CREATE TABLE third_model(id INTEGER PRIMARY KEY, name NOT NULL)"]
+        )
+
+        class ThirdModel(Model):
+            clirm = third_clirm
+            clirm_table_name = "third_model"
+
+            name = Field[str]()
+
+        assert third_clirm.is_read_only
+        with pytest.raises(ReadOnlyError):
+            ThirdModel.create(name="third")
+
+    assert not first_clirm.is_read_only
+    assert not second_clirm.is_read_only
+    assert not third_clirm.is_read_only
+    FirstModel.create(name="first")
+    SecondModel.create(name="second")
+    ThirdModel.create(name="third")
+
+
+def test_database_readonly_does_not_affect_other_databases() -> None:
+    first_clirm = make_clirm(
+        ["CREATE TABLE first_model(id INTEGER PRIMARY KEY, name NOT NULL)"]
+    )
+    second_clirm = make_clirm(
+        ["CREATE TABLE second_model(id INTEGER PRIMARY KEY, name NOT NULL)"]
+    )
+
+    class FirstModel(Model):
+        clirm = first_clirm
+        clirm_table_name = "first_model"
+
+        name = Field[str]()
+
+    class SecondModel(Model):
+        clirm = second_clirm
+        clirm_table_name = "second_model"
+
+        name = Field[str]()
+
+    with first_clirm.readonly():
+        with pytest.raises(ReadOnlyError):
+            FirstModel.create(name="first")
+        SecondModel.create(name="second")
+
+
+def test_database_readonly_restores_query_only() -> None:
+    conn = sqlite3.connect(":memory:")  # static analysis: ignore[internal_error]
+    conn.execute("PRAGMA query_only = ON")
+    clirm_global = Clirm(conn)
+
+    with clirm_global.readonly():
+        assert conn.execute("PRAGMA query_only").fetchone() == (1,)
+
+    assert conn.execute("PRAGMA query_only").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "ON", "enabled"])
+def test_readonly_environment_variable(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("CLIRM_READONLY", value)
+    clirm_global = make_clirm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL)"]
+    )
+
+    class Taxon(Model):
+        clirm = clirm_global
+        clirm_table_name = "taxon"
+
+        name = Field[str]()
+
+    assert clirm_global.is_read_only
+    with pytest.raises(ReadOnlyError):
+        Taxon.create(name="Neurotrichus")
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "NO", "off", " false "])
+def test_false_readonly_environment_variable(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("CLIRM_READONLY", value)
+    clirm_global = make_clirm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL)"]
+    )
+
+    class Taxon(Model):
+        clirm = clirm_global
+        clirm_table_name = "taxon"
+
+        name = Field[str]()
+
+    assert not clirm_global.is_read_only
+    Taxon.create(name="Neurotrichus")
