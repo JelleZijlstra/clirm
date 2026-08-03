@@ -146,6 +146,11 @@ For now only SQLite is supported as a backend.
 
 ## Changelog
 
+Version 0.2 (August 3, 2026)
+
+- Add support for virtual mode
+- Add support for read-only mode
+
 Version 0.1 (April 8, 2024)
 
 - Initial release
