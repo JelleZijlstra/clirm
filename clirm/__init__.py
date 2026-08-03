@@ -5,4 +5,8 @@ from .base import Func as Func
 from .base import Model as Model
 from .base import Query as Query
 from .base import ReadOnlyError as ReadOnlyError
+from .base import UnsetVirtualFieldError as UnsetVirtualFieldError
+from .base import VirtualId as VirtualId
+from .base import VirtualModelError as VirtualModelError
+from .base import VirtualReferenceError as VirtualReferenceError
 from .base import readonly as readonly

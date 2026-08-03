@@ -114,6 +114,32 @@ Both context managers are nestable. Reads continue to work. SQLite's
 active, so writes attempted directly through `Clirm.conn` are also rejected.
 The original `query_only` setting is restored on exit.
 
+## Virtual models
+
+Models may also be created as mutable, in-memory objects without inserting a row:
+
+```python
+virtual_taxon = Taxon.virtual(name="Lagomorpha", status=Status.living)
+virtual_taxon.common_name = "Rabbits and relatives"
+
+persisted_taxon = Taxon.get(name="Rodentia")
+proposal = persisted_taxon.virtual_copy(common_name="Rodents and allies")
+assert proposal.virtual_origin is persisted_taxon
+assert proposal.virtual_origin_id == persisted_taxon.id
+assert proposal.virtual_changes() == {"common_name": "Rodents and allies"}
+```
+
+Every virtual model has a unique, process-local negative `VirtualId`, including a
+virtual copy of an existing row. Virtual models do not enter the database-backed
+instance cache. Nullable fields and fields with defaults are populated automatically;
+reading any other omitted field raises `UnsetVirtualFieldError`.
+
+Assignments to virtual models change only their in-memory values, including inside a
+read-only context. Calling `load()`, `save()`, or `delete_instance()` on a virtual model
+raises `VirtualModelError`. Persisted models and `Model.create()` reject direct foreign
+keys to virtual models with `VirtualReferenceError`. There is intentionally no method
+to commit a virtual model to the database.
+
 ## Backends
 
 For now only SQLite is supported as a backend.

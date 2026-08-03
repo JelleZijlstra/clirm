@@ -8,7 +8,17 @@ from typing import Any, Self, TypeVar
 
 import pytest
 
-from clirm import Clirm, Field, Model, ReadOnlyError, readonly
+from clirm import (
+    Clirm,
+    Field,
+    Model,
+    ReadOnlyError,
+    UnsetVirtualFieldError,
+    VirtualId,
+    VirtualModelError,
+    VirtualReferenceError,
+    readonly,
+)
 
 
 class Status(enum.Enum):
@@ -435,3 +445,148 @@ def test_false_readonly_environment_variable(
 
     assert not clirm_global.is_read_only
     Taxon.create(name="Neurotrichus")
+
+
+def test_virtual_model_is_mutable_without_database_writes() -> None:
+    clirm_global = make_clirm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL, status)"]
+    )
+
+    class Taxon(Model):
+        clirm = clirm_global
+        clirm_table_name = "taxon"
+
+        name = Field[str]()
+        status = Field[Status | None]()
+
+    taxon = Taxon.virtual(name="Neurotrichus")
+
+    assert taxon.is_virtual
+    assert isinstance(taxon.id, VirtualId)
+    assert taxon.name == "Neurotrichus"
+    assert taxon.status is None
+    assert Taxon.select().count() == 0
+
+    with clirm_global.readonly():
+        taxon.name = "Urotrichus"
+
+    assert taxon.name == "Urotrichus"
+    assert Taxon.select().count() == 0
+
+
+def test_virtual_model_can_be_partial() -> None:
+    clirm_global = make_clirm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL, extinct)"]
+    )
+
+    class Taxon(Model):
+        clirm = clirm_global
+        clirm_table_name = "taxon"
+
+        name = Field[str]()
+        extinct = Field[bool]()
+
+    taxon = Taxon.virtual(name="Neurotrichus")
+
+    assert taxon.missing_virtual_fields == frozenset({"extinct"})
+    with pytest.raises(UnsetVirtualFieldError, match="Taxon.extinct"):
+        _ = taxon.extinct
+
+    taxon.extinct = False
+    assert taxon.extinct is False
+    assert taxon.missing_virtual_fields == frozenset()
+
+
+def test_virtual_copy_has_unique_identity_and_origin() -> None:
+    clirm_global = make_clirm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL, status)"]
+    )
+
+    class Taxon(Model):
+        clirm = clirm_global
+        clirm_table_name = "taxon"
+
+        name = Field[str]()
+        status = Field[Status | None]()
+
+    original = Taxon.create(name="Neurotrichus", status=Status.valid)
+    first = original.virtual_copy(name="Urotrichus")
+    second = original.virtual_copy(name="Uropsilus")
+
+    assert isinstance(first.id, VirtualId)
+    assert first.id != second.id
+    assert first.id != original.id
+    assert first.virtual_origin is original
+    assert first.virtual_origin_id == original.id
+    assert first.name == "Urotrichus"
+    assert first.status is Status.valid
+    assert first.virtual_changes() == {"name": "Urotrichus"}
+    assert original.name == "Neurotrichus"
+    assert Taxon(original.id) is original
+
+    third = first.virtual_copy(status=None)
+    assert third.id not in {first.id, second.id}
+    assert third.virtual_origin is original
+    assert third.virtual_changes() == {"status": None}
+
+
+def test_virtual_foreign_keys_preserve_virtual_objects() -> None:
+    clirm_global = make_clirm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL, parent)"]
+    )
+
+    class Taxon(Model):
+        clirm = clirm_global
+        clirm_table_name = "taxon"
+
+        name = Field[str]()
+        parent = Field[Self | None]()
+
+    parent = Taxon.virtual(name="Mammalia")
+    child = Taxon.virtual(name="Rodentia", parent=parent)
+
+    assert child.parent is parent
+    assert Taxon.parent.get_raw(child) == parent.id
+
+
+def test_virtual_models_reject_persistence_operations() -> None:
+    clirm_global = make_clirm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL)"]
+    )
+
+    class Taxon(Model):
+        clirm = clirm_global
+        clirm_table_name = "taxon"
+
+        name = Field[str]()
+
+    taxon = Taxon.virtual(name="Neurotrichus")
+
+    with pytest.raises(VirtualModelError, match="load"):
+        taxon.load()
+    with pytest.raises(VirtualModelError, match="save"):
+        taxon.save()
+    with pytest.raises(VirtualModelError, match="delete"):
+        taxon.delete_instance()
+
+
+def test_persisted_models_reject_virtual_foreign_keys() -> None:
+    clirm_global = make_clirm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL, parent)"]
+    )
+
+    class Taxon(Model):
+        clirm = clirm_global
+        clirm_table_name = "taxon"
+
+        name = Field[str]()
+        parent = Field[Self | None]()
+
+    persisted = Taxon.create(name="Mammalia")
+    virtual = Taxon.virtual(name="Rodentia")
+
+    with pytest.raises(VirtualReferenceError):
+        persisted.parent = virtual
+    with pytest.raises(VirtualReferenceError):
+        Taxon.create(name="Lagomorpha", parent=virtual)
+    assert Taxon.select().count() == 1

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import itertools
 import os
 import sqlite3
 import sys
@@ -40,6 +41,32 @@ class UnresolvedType(Exception):
 
 class ReadOnlyError(RuntimeError):
     """Raised when a database write is attempted in read-only mode."""
+
+
+class VirtualModelError(RuntimeError):
+    """Raised when an operation is not supported for a virtual model."""
+
+
+class UnsetVirtualFieldError(VirtualModelError):
+    """Raised when an unset field is read from a partial virtual model."""
+
+
+class VirtualReferenceError(VirtualModelError):
+    """Raised when a virtual model would be referenced by persisted data."""
+
+
+class VirtualId(int):
+    """A process-local identifier for a virtual model."""
+
+    def __repr__(self) -> str:
+        return f"VirtualId({int(self)})"
+
+
+_virtual_id_counter = itertools.count(-1, -1)
+
+
+def _next_virtual_id() -> VirtualId:
+    return VirtualId(next(_virtual_id_counter))
 
 
 def _read_only_from_environment() -> bool:
@@ -321,6 +348,7 @@ class Query(Generic[ModelT]):
 
 class Field(Generic[T]):
     name: str
+    attribute_name: str
     default: T | None
     _type_object: type[object]
     _allow_none: bool
@@ -341,6 +369,7 @@ class Field(Generic[T]):
         self.related_name = related_name
 
     def __set_name__(self, owner: object, name: str) -> None:
+        self.attribute_name = name
         if not hasattr(self, "name"):
             self.name = name
 
@@ -352,6 +381,14 @@ class Field(Generic[T]):
     def __get__(self, obj: Model | None, objtype: object = None) -> T | Self:
         if obj is None:
             return self
+        if obj.is_virtual:
+            try:
+                return obj._clirm_virtual_values[self.name]
+            except KeyError as exc:
+                raise UnsetVirtualFieldError(
+                    f"{type(obj).__name__}.{self.attribute_name} was not set on this "
+                    "virtual model"
+                ) from exc
         raw_value = self.get_raw(obj)
         return self.deserialize(raw_value)
 
@@ -362,14 +399,45 @@ class Field(Generic[T]):
 
     def get_raw(self, obj: Model) -> Any:
         if self.name not in obj._clirm_data:
+            if obj.is_virtual:
+                raise UnsetVirtualFieldError(
+                    f"{type(obj).__name__}.{self.attribute_name} was not set on this "
+                    "virtual model"
+                )
             obj.load()
         return obj._clirm_data[self.name]
 
     def __set__(self, obj: Model, value: T) -> None:
+        if obj.is_virtual:
+            raw_value, cooked_value = self.prepare_virtual(value)
+            if self.name in obj._clirm_data and obj._clirm_data[self.name] == raw_value:
+                return
+            obj._clirm_data[self.name] = raw_value
+            obj._clirm_virtual_values[self.name] = cooked_value
+            obj._clirm_dirty_fields.add(self.name)
+            return
+        self.validate_persistent(value)
         raw_value = self.serialize(value)
         if self.name in obj._clirm_data and obj._clirm_data[self.name] == raw_value:
             return
         self.set_raw(obj, raw_value)
+
+    def prepare_virtual(self, value: T) -> tuple[Any, T]:
+        """Validate and prepare the raw and cooked forms of a virtual value."""
+        raw_value = self.serialize(value)
+        if value is not None and issubclass(self.type_object, Model):
+            # Deserializing a virtual foreign key would construct a database-backed
+            # object for its temporary ID instead of preserving the virtual object.
+            return raw_value, value
+        return raw_value, self.deserialize(raw_value)
+
+    def validate_persistent(self, value: T) -> None:
+        """Reject values that cannot safely be written to the database."""
+        if isinstance(value, Model) and value.is_virtual:
+            raise VirtualReferenceError(
+                f"cannot store virtual {type(value).__name__} {value.id!r} in "
+                f"persisted field {self.model_cls.__name__}.{self.attribute_name}"
+            )
 
     def serialize(self, value: T) -> Any:
         if self.allow_none and value is None:
@@ -387,8 +455,11 @@ class Field(Generic[T]):
         return value
 
     def set_raw(self, obj: Model, value: Any) -> None:
-        if self.full_type is Id:
-            raise AttributeError("Cannot set id field")
+        if obj.is_virtual:
+            obj._clirm_data[self.name] = value
+            obj._clirm_virtual_values[self.name] = self.deserialize(value)
+            obj._clirm_dirty_fields.add(self.name)
+            return
         obj.clirm.check_writable()
         obj._clirm_data[self.name] = value
         obj._clirm_dirty_fields.add(self.name)
@@ -519,6 +590,11 @@ class Field(Generic[T]):
         return f"<Field: {self.name}>"
 
 
+class _IdField(Field[int]):
+    def set_raw(self, obj: Model, value: Any) -> None:
+        raise AttributeError("Cannot set id field")
+
+
 def make_foreign_key_accessor(field: Field[Any]) -> Any:
     @property
     def accessor(
@@ -540,10 +616,13 @@ class Model:
     _clirm_instance_cache: ClassVar[weakref.WeakValueDictionary[int, Self]]
     _clirm_has_unresolved_types: ClassVar[bool] = True
     _clirm_data: dict[str, Any]
+    _clirm_virtual_values: dict[str, Any]
+    _clirm_virtual_origin: Model | None
+    _clirm_virtual_baseline: dict[str, Any]
 
     DoesNotExist = DoesNotExist
 
-    id = Field[Id]()
+    id = _IdField()
 
     def __init_subclass__(cls) -> None:
         if not hasattr(cls, "clirm_table_name"):
@@ -579,6 +658,9 @@ class Model:
     def __init__(self, id: int, **kwargs: Any) -> None:
         self._clirm_data = {"id": id, **kwargs}
         self._clirm_dirty_fields = set()
+        self._clirm_virtual_values = {}
+        self._clirm_virtual_origin = None
+        self._clirm_virtual_baseline = {}
 
     def __new__(cls, id: int, **kwargs: Any) -> Self:
         if id in cls._clirm_instance_cache:
@@ -590,7 +672,101 @@ class Model:
             cls._clirm_instance_cache[id] = inst
         return inst
 
+    @property
+    def is_virtual(self) -> bool:
+        """Whether this model exists only in memory."""
+        return isinstance(self._clirm_data.get("id"), VirtualId)
+
+    @property
+    def virtual_origin(self) -> Self | None:
+        """The persisted model this virtual model was copied from, if any."""
+        if not self.is_virtual:
+            return None
+        # static analysis: ignore[incompatible_return_value]
+        return self._clirm_virtual_origin
+
+    @property
+    def virtual_origin_id(self) -> int | None:
+        """The database ID of this virtual model's origin, if any."""
+        origin = self.virtual_origin
+        return None if origin is None else origin.id
+
+    @property
+    def missing_virtual_fields(self) -> frozenset[str]:
+        """Fields without values on a partial virtual model."""
+        if not self.is_virtual:
+            return frozenset()
+        return frozenset(
+            name
+            for name, field in self.clirm_fields.items()
+            if field.name not in self._clirm_data
+        )
+
+    @classmethod
+    def virtual(cls, **kwargs: Any) -> Self:
+        """Create a mutable in-memory model without touching the database."""
+        values = dict(kwargs)
+        inst = object.__new__(cls)
+        virtual_id = _next_virtual_id()
+        inst._clirm_data = {"id": virtual_id}
+        inst._clirm_virtual_values = {"id": virtual_id}
+        inst._clirm_virtual_origin = None
+        inst._clirm_virtual_baseline = {}
+        inst._clirm_dirty_fields = set()
+
+        for name, field in cls.clirm_fields.items():
+            if name in values:
+                cooked_value = values.pop(name)
+            elif field.default is not None:
+                cooked_value = field.default
+            elif field.allow_none:
+                cooked_value = None
+            else:
+                continue
+            raw_value, cooked_value = field.prepare_virtual(cooked_value)
+            inst._clirm_data[field.name] = raw_value
+            inst._clirm_virtual_values[field.name] = cooked_value
+            inst._clirm_dirty_fields.add(field.name)
+        if values:
+            raise TypeError(f"Extra kwargs {', '.join(values)}")
+        return inst
+
+    def virtual_copy(self, **changes: Any) -> Self:
+        """Return an independent virtual copy of this model with optional changes."""
+        if not self.is_virtual:
+            self.load()
+        values = {
+            name: getattr(self, name)
+            for name, field in self.clirm_fields.items()
+            if field.name in self._clirm_data
+        }
+        result = type(self).virtual(**values)
+        result._clirm_virtual_origin = (
+            self._clirm_virtual_origin if self.is_virtual else self
+        )
+        result._clirm_virtual_baseline = dict(result._clirm_data)
+        result._clirm_dirty_fields.clear()
+        for name, value in changes.items():
+            if name not in self.clirm_fields:
+                raise TypeError(f"Extra kwarg {name}")
+            setattr(result, name, value)
+        return result
+
+    def virtual_changes(self) -> dict[str, Any]:
+        """Return logical field names changed from this virtual model's baseline."""
+        if not self.is_virtual:
+            return {}
+        missing = object()
+        return {
+            name: getattr(self, name)
+            for name, field in self.clirm_fields.items()
+            if self._clirm_data.get(field.name, missing)
+            != self._clirm_virtual_baseline.get(field.name, missing)
+        }
+
     def load(self) -> None:
+        if self.is_virtual:
+            raise VirtualModelError(f"cannot load virtual {type(self).__name__}")
         query = f"SELECT * FROM `{self.clirm_table_name}` WHERE id = ?"
         row = self.clirm.select_one(query, (self.id,))
         if row is None:
@@ -598,6 +774,8 @@ class Model:
         self._clirm_data.update(row)
 
     def save(self) -> None:
+        if self.is_virtual:
+            raise VirtualModelError(f"cannot save virtual {type(self).__name__}")
         if not self._clirm_dirty_fields:
             return
         self.clirm.check_writable()
@@ -625,6 +803,7 @@ class Model:
                 cooked_value = field.default
                 if cooked_value is None and not field.allow_none:
                     continue
+            field.validate_persistent(cooked_value)
             value = field.serialize(cooked_value)
             column_names.append(field.name)
             params.append(value)
@@ -653,6 +832,8 @@ class Model:
         return cls.select().filter(*conditions, **kwargs).get()
 
     def delete_instance(self) -> None:
+        if self.is_virtual:
+            raise VirtualModelError(f"cannot delete virtual {type(self).__name__}")
         self.clirm.check_writable()
         query = f"DELETE FROM {self.clirm_table_name} WHERE id = ?"
         self.clirm.execute(query, (self.id,))
