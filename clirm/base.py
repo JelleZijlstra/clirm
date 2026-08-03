@@ -7,8 +7,9 @@ import os
 import sqlite3
 import sys
 import weakref
-from collections.abc import Generator, Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from types import NoneType, UnionType
 from typing import (
     Any,
@@ -218,7 +219,7 @@ class Comparison(Condition):
                     return f"(`{self.left.name}` IS NOT NULL)", ()
                 case _:
                     raise TypeError("Unsupported operator")
-        right = self.left.serialize(self.right)
+        right = self.left.serialize_for_query(self.right)
         match self.operator:
             case "INSTR":
                 return f"INSTR(`{self.left.name}`, ?)", (right,)
@@ -254,7 +255,7 @@ class Contains(Condition):
     values: Sequence[Any]
 
     def stringify(self) -> tuple[str, tuple[object, ...]]:
-        vals = tuple(self.left.serialize(val) for val in self.values)
+        vals = tuple(self.left.serialize_for_query(val) for val in self.values)
         placeholders = ", ".join("?" for _ in vals)
         condition = "IN" if self.positive else "NOT IN"
         return f"(`{self.left.name}` {condition} ({placeholders}))", vals
@@ -395,6 +396,8 @@ class Field(Generic[T]):
     def deserialize(self, raw_value: Any) -> T:
         if self.allow_none and raw_value is None:
             return None
+        if issubclass(self.type_object, Model):
+            return self.type_object.resolve_reference(raw_value)
         return self.type_object(raw_value)
 
     def get_raw(self, obj: Model) -> Any:
@@ -453,6 +456,14 @@ class Field(Generic[T]):
         if issubclass(self.type_object, Model):
             return value.id
         return value
+
+    def serialize_for_query(self, value: T) -> Any:
+        """Serialize a query value, honoring active virtual substitutions."""
+        if issubclass(self.type_object, Model) and isinstance(value, self.type_object):
+            origin_id = _get_active_virtual_origin_id(value)
+            if origin_id is not None:
+                return origin_id
+        return self.serialize(value)
 
     def set_raw(self, obj: Model, value: Any) -> None:
         if obj.is_virtual:
@@ -764,6 +775,15 @@ class Model:
             != self._clirm_virtual_baseline.get(field.name, missing)
         }
 
+    @classmethod
+    def resolve_reference(cls, id: int) -> Self:
+        """Resolve a persisted ID through the active virtual substitution context."""
+        replacement = _get_virtual_substitution(cls, id)
+        if replacement is not None:
+            # static analysis: ignore[incompatible_return_value]
+            return replacement
+        return cls(id)
+
     def load(self) -> None:
         if self.is_virtual:
             raise VirtualModelError(f"cannot load virtual {type(self).__name__}")
@@ -837,3 +857,53 @@ class Model:
         self.clirm.check_writable()
         query = f"DELETE FROM {self.clirm_table_name} WHERE id = ?"
         self.clirm.execute(query, (self.id,))
+
+
+_virtual_substitutions: ContextVar[Mapping[tuple[type[Model], int], Model]] = (
+    ContextVar("clirm_virtual_substitutions", default={})
+)
+
+
+def _get_virtual_substitution(model_cls: type[ModelT], origin_id: int) -> ModelT | None:
+    # static analysis: ignore[incompatible_return_value]
+    return _virtual_substitutions.get().get((model_cls, origin_id))
+
+
+def _get_active_virtual_origin_id(model: Model) -> int | None:
+    origin = model.virtual_origin
+    if origin is None:
+        return None
+    if _get_virtual_substitution(type(origin), origin.id) is model:
+        return origin.id
+    return None
+
+
+@contextmanager
+def substitute_virtual_models(models: Iterable[Model]) -> Generator[None]:
+    """Temporarily resolve persisted references to registered virtual copies.
+
+    Query predicates involving a registered virtual copy use its origin ID. This
+    overlays reference identity only; it does not add new virtual rows to arbitrary
+    database queries or make persisted and virtual models globally equal.
+    """
+    substitutions = dict(_virtual_substitutions.get())
+    for model in models:
+        if not model.is_virtual:
+            raise TypeError(f"expected a virtual model, got {model!r}")
+        origin = model.virtual_origin
+        if origin is None:
+            continue
+        key = (type(origin), origin.id)
+        previous = substitutions.get(key)
+        if previous is not None and previous is not model:
+            raise ValueError(
+                f"multiple virtual substitutions for {type(origin).__name__} "
+                f"#{origin.id}"
+            )
+        substitutions[key] = model
+
+    token = _virtual_substitutions.set(substitutions)
+    try:
+        yield
+    finally:
+        _virtual_substitutions.reset(token)

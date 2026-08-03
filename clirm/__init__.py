@@ -10,3 +10,4 @@ from .base import VirtualId as VirtualId
 from .base import VirtualModelError as VirtualModelError
 from .base import VirtualReferenceError as VirtualReferenceError
 from .base import readonly as readonly
+from .base import substitute_virtual_models as substitute_virtual_models
