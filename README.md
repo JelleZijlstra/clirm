@@ -160,6 +160,10 @@ For now only SQLite is supported as a backend.
 
 ## Changelog
 
+Version 0.3.1 (August 3, 2026)
+
+- Fix version
+
 Version 0.3.0 (August 3, 2026)
 
 - Add support for substituting virtual models
