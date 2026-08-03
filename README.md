@@ -140,13 +140,31 @@ raises `VirtualModelError`. Persisted models and `Model.create()` reject direct 
 keys to virtual models with `VirtualReferenceError`. There is intentionally no method
 to commit a virtual model to the database.
 
+Code that validates a proposed object can temporarily substitute virtual copies for
+their persisted origins when following ORM references:
+
+```python
+with substitute_virtual_models([proposal]):
+    assert proposal.taxon.base_name is proposal
+    assert list(NameUsage.filter(NameUsage.name == proposal))
+```
+
+Within this context, foreign keys to an origin resolve to its virtual copy, and query
+predicates involving that copy use the origin's database ID. This is a reference
+overlay, not a virtual database: newly created virtual objects are not added to
+queries, and predicates on changed scalar fields still query persisted data.
+
 ## Backends
 
 For now only SQLite is supported as a backend.
 
 ## Changelog
 
-Version 0.2 (August 3, 2026)
+Version 0.3.0 (August 3, 2026)
+
+- Add support for substituting virtual models
+
+Version 0.2.0 (August 3, 2026)
 
 - Add support for virtual mode
 - Add support for read-only mode

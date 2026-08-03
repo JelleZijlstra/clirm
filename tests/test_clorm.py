@@ -18,6 +18,7 @@ from clirm import (
     VirtualModelError,
     VirtualReferenceError,
     readonly,
+    substitute_virtual_models,
 )
 
 
@@ -590,3 +591,69 @@ def test_persisted_models_reject_virtual_foreign_keys() -> None:
     with pytest.raises(VirtualReferenceError):
         Taxon.create(name="Lagomorpha", parent=virtual)
     assert Taxon.select().count() == 1
+
+
+def test_virtual_substitution_overlays_references_and_queries() -> None:
+    clirm_global = make_clirm(
+        [
+            "CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL, base_name)",
+            "CREATE TABLE name(id INTEGER PRIMARY KEY, root_name NOT NULL)",
+            "CREATE TABLE usage(id INTEGER PRIMARY KEY, name NOT NULL)",
+        ]
+    )
+
+    class Name(Model):
+        clirm = clirm_global
+        clirm_table_name = "name"
+
+        root_name = Field[str]()
+
+    class Taxon(Model):
+        clirm = clirm_global
+        clirm_table_name = "taxon"
+
+        name = Field[str]()
+        base_name = Field[Name | None]()
+
+    class Usage(Model):
+        clirm = clirm_global
+        clirm_table_name = "usage"
+
+        name = Field[Name]()
+
+    name = Name.create(root_name="Neurotrichus")
+    taxon = Taxon.create(name="Neurotrichus", base_name=name)
+    usage = Usage.create(name=name)
+    proposal = name.virtual_copy(root_name="Urotrichus")
+
+    assert taxon.base_name is name
+    assert list(Usage.filter(Usage.name == proposal)) == []
+
+    with substitute_virtual_models([proposal]):
+        assert taxon.base_name is proposal
+        assert list(Usage.filter(Usage.name == proposal)) == [usage]
+        assert Name.resolve_reference(name.id) is proposal
+
+    assert taxon.base_name is name
+
+
+def test_virtual_substitution_rejects_ambiguous_copies() -> None:
+    clirm_global = make_clirm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name NOT NULL)"]
+    )
+
+    class Taxon(Model):
+        clirm = clirm_global
+        clirm_table_name = "taxon"
+
+        name = Field[str]()
+
+    original = Taxon.create(name="Neurotrichus")
+    first = original.virtual_copy(name="Urotrichus")
+    second = original.virtual_copy(name="Uropsilus")
+
+    with (
+        pytest.raises(ValueError, match="multiple virtual substitutions"),
+        substitute_virtual_models([first, second]),
+    ):
+        pass
