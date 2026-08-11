@@ -798,13 +798,21 @@ class Model:
             raise VirtualModelError(f"cannot save virtual {type(self).__name__}")
         if not self._clirm_dirty_fields:
             return
+        model_id = self.id
         self.clirm.check_writable()
         updates = ", ".join(
             f"`{field_name}` = ?" for field_name in self._clirm_dirty_fields
         )
         params = [self._clirm_data[field] for field in self._clirm_dirty_fields]
         query = f"UPDATE `{self.clirm_table_name}` SET {updates} WHERE id = ?"
-        self.clirm.execute(query, (*params, self.id))
+        try:
+            self.clirm.execute(query, (*params, model_id))
+        except sqlite3.Error:
+            # The cached values have not been persisted. Invalidate them so
+            # the next field access reloads the database-backed state.
+            self._clirm_data = {"id": model_id}
+            self._clirm_dirty_fields.clear()
+            raise
         self._clirm_dirty_fields.clear()
 
     def serialize(self) -> Self:
