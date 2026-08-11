@@ -180,6 +180,34 @@ def test_default() -> None:
         Taxon.create(not_a_kwarg=1, name="Veratalpa")
 
 
+def test_failed_save_invalidates_unpersisted_cache() -> None:
+    clirm_global = make_clirm(
+        ["CREATE TABLE taxon(id INTEGER PRIMARY KEY, name UNIQUE, is_extinct)"]
+    )
+
+    class Taxon(Model):
+        clirm = clirm_global
+        clirm_table_name = "taxon"
+
+        name = Field[str]()
+        extinct = Field[bool]("is_extinct", default=False)
+
+    Taxon.create(name="Neurotrichus")
+    txn = Taxon.create(name="Megalomys")
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match=r"UNIQUE constraint failed: taxon\.name"
+    ):
+        txn.name = "Neurotrichus"
+
+    assert txn._clirm_data == {"id": txn.id}
+    assert txn._clirm_dirty_fields == set()
+    assert txn.name == "Megalomys"
+
+    txn.extinct = True
+    assert txn.extinct is True
+
+
 @dataclass
 class ADT:
     value: int
